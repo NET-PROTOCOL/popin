@@ -57,5 +57,6 @@ uint8_t L3_msg_encodeRegisterResponse(uint8_t* msg, uint8_t success, uint8_t rea
 uint8_t L3_msg_encodeQueueInfo(uint8_t* msg, uint8_t queueNumber, uint8_t totalWaiting);
 uint8_t L3_msg_encodeBoothAnnounce(uint8_t* msg, uint8_t boothId, uint8_t currentCount, 
                                    uint8_t capacity, uint8_t waitingCount);
+uint8_t L3_msg_encodeAdminMessage(uint8_t* msg, const char* message);  // Admin message function
 
 #endif // L3_MSG_H

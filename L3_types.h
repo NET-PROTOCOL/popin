@@ -1,3 +1,4 @@
+// L3_types.h - Add RSSI tracking to booth structure
 #ifndef L3_TYPES_H
 #define L3_TYPES_H
 
@@ -13,6 +14,17 @@ typedef struct {
     uint32_t checkInTime;
     uint32_t sessionStartTime;
 } User_t;
+
+// Booth info for scanning (new structure)
+typedef struct {
+    uint8_t boothId;
+    int16_t rssi;  // Signal strength
+    uint8_t currentCount;
+    uint8_t capacity;
+    uint8_t waitingCount;
+    uint32_t lastSeenTime;  // Timestamp for timeout
+    uint8_t isValid;  // Valid entry flag
+} BoothScanInfo_t;
 
 // Booth structure
 typedef struct {
