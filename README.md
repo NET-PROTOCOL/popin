@@ -1,4 +1,4 @@
-## Pop-in Protocol 구현 현황 및 시나리오
+## 📌 Pop-in Protocol 구현 현황 및 시나리오
 
 ### **구현된 기능 목록**
 
@@ -41,12 +41,34 @@
 3. 최적 부스 자동 선택
    → "Selected Booth 1 as optimal choice" (가장 가까움)
 
-4. 부스 정보 확인
-   → "Booth 1 - Pop-up Store Experience"
-   → "Current users: 0/5"
+4. 최적 부스의 정보 확인
+ 
+   Connecting to Booth 1…
 
-5. 자동 입장
-   → "Registration successful! Welcome!"
+   [User] Received booth info from Booth 1
+   
+   === BOOTH INFORMATION ===
+   Description: Booth 1 - Pop-up Store Experience
+   Current users: 0/5
+   Waiting users: 0
+
+5. 입장 선택
+ 
+   Would you like to experience this booth? (y/n): _
+      'y' 또는 'Y':
+         USER_RESPONSE (YES) 전송
+         REGISTER_REQUEST 전송
+         입장 진행
+      'n' 또는 'N':
+         USER_RESPONSE (NO) 전송
+         스캔 모드로 복귀
+         다른 부스 탐색 계속
+   
+   Sending registration request…
+   
+   Registration successful! Welcome to the booth!
+   Your experience session has started.
+   Press ‘e’ to exit the booth.
 
 6. 체험 중 관리자 공지 수신
    → "[ADMIN BROADCAST] Welcome! 50% discount event!"
