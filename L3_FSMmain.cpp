@@ -220,6 +220,18 @@ void L3_FSMrun(void) {
                     
                     pc.printf("[Admin] Sent booth announce to User %d\n", srcId);
                 }
+            case MSG_TYPE_USER_RESPONSE:
+                if (isAdmin) {
+                    uint8_t* msgData = L3_msg_getData(dataPtr);
+                    uint8_t response = msgData[0];
+                    
+                    if (response == USER_RESPONSE_YES) {
+                        pc.printf("\n[Admin] User %d wants to experience the booth\n", srcId);
+                        // User will send REGISTER_REQUEST next
+                    } else {
+                        pc.printf("\n[Admin] User %d declined booth experience\n", srcId);
+                    }
+                }
                 break;
                 
             case MSG_TYPE_ADMIN_MESSAGE:
@@ -544,12 +556,9 @@ static void handleBoothInfo(uint8_t* data, uint8_t size) {
     pc.printf("Waiting users: %d\n", waitingUsers);
     pc.printf("\nWould you like to experience this booth? (y/n): ");
     
-    // Auto-respond YES for demo
-    pc.printf("y (auto-response)\n");
-    
-    // Send registration request immediately
-    pc.printf("Sending registration request...\n");
-    sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
+    // Wait for user input
+    L3_event_setEventFlag(L3_event_keyboardInput);
+    // State will be handled in keyboard input handler
 }
 
 static void handleRegisterResponse(uint8_t* data) {
@@ -646,6 +655,40 @@ static void removeUserFromActiveList(uint8_t userId) {
 static void L3service_processKeyboardInput(void) {
     char c = pc.getc();
     
+    // Handle booth selection response
+    if (L3_event_checkEventFlag(L3_event_keyboardInput) && main_state == L3STATE_CONNECTED) {
+        if (c == 'y' || c == 'Y') {
+            pc.printf("y\n");
+            
+            // Send USER_RESPONSE first (according to protocol)
+            uint8_t responseMsg[2];
+            L3_msg_encodeUserResponse(responseMsg, USER_RESPONSE_YES);
+            L3_LLI_dataReqFunc(responseMsg, 2, currentBoothId);
+            
+            // Then send registration request
+            pc.printf("Sending registration request...\n");
+            sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
+            L3_event_clearEventFlag(L3_event_keyboardInput);
+        } else if (c == 'n' || c == 'N') {
+            pc.printf("n\n");
+            
+            // Send USER_RESPONSE NO
+            uint8_t responseMsg[2];
+            L3_msg_encodeUserResponse(responseMsg, USER_RESPONSE_NO);
+            L3_LLI_dataReqFunc(responseMsg, 2, currentBoothId);
+            
+            pc.printf("Declined. Returning to scanning mode...\n");
+            main_state = L3STATE_SCANNING;
+            currentBoothId = 0;
+            L3_event_clearEventFlag(L3_event_keyboardInput);
+            
+            // Reset scan list for new scan
+            initializeBoothScanList();
+        }
+        return;
+    }
+    
+    // Handle exit command
     if (c == 'e' || c == 'E') {
         if (!isAdmin && main_state == L3STATE_IN_USE) {
             pc.printf("\nExiting booth...\n");

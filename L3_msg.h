@@ -53,6 +53,7 @@ uint8_t L3_msg_encodeUserInfoRequest(uint8_t* msg);
 uint8_t L3_msg_encodeConnectRequest(uint8_t* msg, uint8_t userId);
 uint8_t L3_msg_encodeBoothInfo(uint8_t* msg, uint8_t currentCount, uint8_t capacity, 
                                 uint8_t waitingCount, const char* description);
+uint8_t L3_msg_encodeUserResponse(uint8_t* msg, uint8_t response);  // Add this
 uint8_t L3_msg_encodeRegisterResponse(uint8_t* msg, uint8_t success, uint8_t reason);
 uint8_t L3_msg_encodeQueueInfo(uint8_t* msg, uint8_t queueNumber, uint8_t totalWaiting);
 uint8_t L3_msg_encodeBoothAnnounce(uint8_t* msg, uint8_t boothId, uint8_t currentCount, 

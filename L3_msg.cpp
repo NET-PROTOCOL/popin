@@ -18,10 +18,10 @@ uint8_t L3_msg_encodeUserInfoRequest(uint8_t* msg) {
     return 1; // Total message size
 }
 
-// Encode CONNECT_REQUEST message
-uint8_t L3_msg_encodeConnectRequest(uint8_t* msg, uint8_t userId) {
-    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_CONNECT_REQUEST;
-    msg[L3_MSG_OFFSET_DATA] = userId;
+// Encode USER_RESPONSE message
+uint8_t L3_msg_encodeUserResponse(uint8_t* msg, uint8_t response) {
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_USER_RESPONSE;
+    msg[L3_MSG_OFFSET_DATA] = response;
     return 2; // Total message size
 }
 
