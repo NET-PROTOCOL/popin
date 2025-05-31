@@ -65,3 +65,12 @@ uint8_t L3_msg_encodeBoothAnnounce(uint8_t* msg, uint8_t boothId, uint8_t curren
     msg[L3_MSG_OFFSET_DATA + 3] = waitingCount;
     return 5; // Total message size
 }
+
+// Encode ADMIN_MESSAGE message
+uint8_t L3_msg_encodeAdminMessage(uint8_t* msg, const char* message) {
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_ADMIN_MESSAGE;
+    uint8_t msgLen = strlen(message);
+    if (msgLen > 100) msgLen = 100;  // Limit message length
+    memcpy(&msg[L3_MSG_OFFSET_DATA], message, msgLen + 1); // Include null terminator
+    return L3_MSG_OFFSET_DATA + msgLen + 1; // Total message size
+}

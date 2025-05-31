@@ -1,3 +1,4 @@
+// L3_LLinterface.cpp - Add RSSI/SNR getters
 #include "mbed.h"
 #include "L3_FSMevent.h"
 #include "L3_msg.h"
@@ -18,7 +19,8 @@ void (*L3_LLI_reconfigSrcIdReqFunc)(uint8_t myId);
 //interface event : DATA_IND, RX data has arrived
 void L3_LLI_dataInd(uint8_t* dataPtr, uint8_t srcId, uint8_t size, int8_t snr, int16_t rssi)
 {
-    debug_if(DBGMSG_L3, "\n[L3] --> DATA IND : src:%i, size:%i, data[0]:%i\n", srcId, size, dataPtr[0]);
+    debug_if(DBGMSG_L3, "\n[L3] --> DATA IND : src:%i, size:%i, data[0]:%i, RSSI:%i, SNR:%i\n", 
+             srcId, size, dataPtr[0], rssi, snr);
 
     memcpy(rcvdMsg, dataPtr, size*sizeof(uint8_t));
     rcvdSize = size;
@@ -54,6 +56,16 @@ uint8_t L3_LLI_getSize()
 uint8_t L3_LLI_getSrcId()
 {
     return rcvdSrcId;
+}
+
+int16_t L3_LLI_getRssi()
+{
+    return rcvdRssi;
+}
+
+int8_t L3_LLI_getSnr()
+{
+    return rcvdSnr;
 }
 
 void L3_LLI_setDataReqFunc(void (*funcPtr)(uint8_t*, uint8_t, uint8_t))
