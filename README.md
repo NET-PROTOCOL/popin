@@ -9,6 +9,7 @@
 - ✅ 부스 입장/퇴장 ('e' 키)
 - ✅ 재입장 차단 (1인 1회 체험)
 - ✅ 관리자 메시지 수신
+- ✅ 입장시 타이머, 시간 만료시 자동 퇴장
 
 #### 2. **관리자 (Admin) 기능**
 - ✅ 부스 자동 브로드캐스트
@@ -16,6 +17,7 @@
 - ✅ 부스 상태 확인 ('s' 키)
 - ✅ 수동 공지 전송 ('a' 키)
 - ✅ Quiet 모드 ('q' 키)
+- ✅ 활성 사용자의 타이머 상테 확인 ('t' 키)
 - ✅ 사용자 입/퇴장 관리
 - ✅ 등록 이력 관리
 
@@ -65,16 +67,26 @@
          다른 부스 탐색 계속
    
    Sending registration request…
-   
+   # admin에서 등록 승인하면 세션 타이머 시작됨
    Registration successful! Welcome to the booth!
    Your experience session has started.
    Press ‘e’ to exit the booth.
 
-6. 체험 중 관리자 공지 수신
+6. 체험 중
+   - 관리자 공지 수신
    → "[ADMIN BROADCAST] Welcome! 50% discount event!"
+   - 타이머
+      User: 5초마다 남은 시간 확인 (25초... 20초... 15초...)
+      Admin: 't' 입력 → User의 남은 시간 확인
 
 7. 체험 완료 후 퇴장 ('e' 키)
    → "Exited the booth."
+
+8. 세션 만료 자동 퇴장
+   → 20초 경과
+   Admin: User1 세션 타임아웃 감지 → TIMEOUT_ALERT 전송
+   User1: "Your session time has expired!" 알림 수신
+   User1: 자동으로 부스 퇴장 → SCANNING 상태로 복귀
 ```
 
 #### **시나리오 2: 재방문 시도**
@@ -108,6 +120,12 @@
 4. 혼잡 시 조용한 모드 ('q' 키)
    → 자동 브로드캐스트 중지
    → 수동 관리 모드
+
+5. 타이머 정보 확인 ('t' 키)
+   === SESSION TIMERS ===
+   User 4: 20 seconds remaining
+   User 5: 25 seconds remaining
+   User 6: 30 seconds remaining
 ```
 
 #### **시나리오 4: 다중 부스 환경**
