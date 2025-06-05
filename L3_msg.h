@@ -4,22 +4,22 @@
 #include "mbed.h"
 
 // Message Types according to Pop-in Protocol
-#define MSG_TYPE_USER_INFO_REQUEST      0x01
-#define MSG_TYPE_CONNECT_REQUEST        0x02
-#define MSG_TYPE_CONNECT_RESPONSE       0x03
-#define MSG_TYPE_BOOTH_INFO             0x04
-#define MSG_TYPE_USER_RESPONSE          0x05
-#define MSG_TYPE_REGISTER_REQUEST       0x06
-#define MSG_TYPE_REGISTER_RESPONSE      0x07
-#define MSG_TYPE_QUEUE_JOIN_REQUEST     0x08
-#define MSG_TYPE_QUEUE_INFO             0x09
-#define MSG_TYPE_EXIT_REQUEST           0x0A
-#define MSG_TYPE_TIMEOUT_ALERT          0x0B
-#define MSG_TYPE_ADMIN_MESSAGE          0x0C
-#define MSG_TYPE_CHAT_MESSAGE           0x0D
-#define MSG_TYPE_BOOTH_SCAN             0x0E
-#define MSG_TYPE_BOOTH_ANNOUNCE         0x0F
-#define MSG_TYPE_EXIT_RESPONSE          0x10
+#define MSG_TYPE_USER_INFO_REQUEST      0x01  // 
+#define MSG_TYPE_CONNECT_REQUEST        0x02  // 연결 요청
+#define MSG_TYPE_CONNECT_RESPONSE       0x03  // 연결 응답
+#define MSG_TYPE_BOOTH_INFO             0x04  // 부스 상세 정보 응답
+#define MSG_TYPE_USER_RESPONSE          0x05  // 사용자 응답
+#define MSG_TYPE_REGISTER_REQUEST       0x06  // 등록 요청
+#define MSG_TYPE_REGISTER_RESPONSE      0x07  // 등록 결과
+#define MSG_TYPE_QUEUE_JOIN_REQUEST     0x08  // 대기열 진입 요청
+#define MSG_TYPE_QUEUE_INFO             0x09  // 대기 정보
+#define MSG_TYPE_EXIT_REQUEST           0x0A  // 퇴장 요청
+#define MSG_TYPE_TIMEOUT_ALERT          0x0B  // 타임 아웃 알림
+#define MSG_TYPE_ADMIN_MESSAGE          0x0C  // 관리자 메시지
+#define MSG_TYPE_CHAT_MESSAGE           0x0D  // 사용자 채팅
+#define MSG_TYPE_BOOTH_SCAN             0x0E  // 부스 스캔 요청
+#define MSG_TYPE_BOOTH_ANNOUNCE         0x0F  // 부스 정보 응답
+#define MSG_TYPE_EXIT_RESPONSE          0x10  // exit
 #define MSG_TYPE_QUEUE_READY            0x11  // 입장 준비 알림
 #define MSG_TYPE_QUEUE_READY_ACK        0x12  // 입장 준비 확인 (예약)
 #define MSG_TYPE_QUEUE_UPDATE           0x13  // 대기 순번 업데이트
