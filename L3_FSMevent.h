@@ -6,7 +6,7 @@ typedef enum L3_event
     L3_event_dataSendCnf = 5,
     L3_event_recfgSrcIdCnf = 6,
     L3_event_keyboardInput = 7,
-    L3_event_boothSelectionTimeout = 8  // New event for RSSI-based selection
+    L3_event_boothSelectionTimeout = 8  // RSSI-based selection
 } L3_event_e;
 
 void L3_event_setEventFlag(L3_event_e event);

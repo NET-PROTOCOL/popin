@@ -20,6 +20,11 @@
 #define MSG_TYPE_BOOTH_SCAN             0x0E
 #define MSG_TYPE_BOOTH_ANNOUNCE         0x0F
 #define MSG_TYPE_EXIT_RESPONSE          0x10
+#define MSG_TYPE_QUEUE_READY            0x11  // 입장 준비 알림
+#define MSG_TYPE_QUEUE_READY_ACK        0x12  // 입장 준비 확인 (예약)
+#define MSG_TYPE_QUEUE_UPDATE           0x13  // 대기 순번 업데이트
+#define MSG_TYPE_QUEUE_LEAVE            0x14  // 대기열 이탈 요청
+
 
 // User Response Values
 #define USER_RESPONSE_YES               1
@@ -36,7 +41,7 @@
 #define ADMIN_ID_END                    3
 
 // Capacity and Limits
-#define MAX_BOOTH_CAPACITY              5
+#define MAX_BOOTH_CAPACITY              1
 #define MAX_USERS                       20
 #define MAX_BOOTHS                      3
 

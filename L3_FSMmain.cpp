@@ -1,4 +1,4 @@
-// L3_FSMmain.cpp - Enhanced with RSSI-based booth selection and Session Timer
+// L3_FSMmain.cpp
 #include "L3_FSMevent.h"
 #include "L3_msg.h"
 #include "L3_types.h"
@@ -8,33 +8,51 @@
 #include "mbed.h"
 
 // FSM States for Pop-in Protocol
-#define L3STATE_SCANNING        0
-#define L3STATE_CONNECTED       1
-#define L3STATE_WAITING         2
-#define L3STATE_IN_USE          3
+#define L3STATE_SCANNING 0
+#define L3STATE_CONNECTED 1
+#define L3STATE_WAITING 2
+#define L3STATE_IN_USE 3
 
 // Session Timer Settings
-#define SESSION_DURATION_MS     20000   // 20 seconds per session (configurable)
-#define TIMER_CHECK_INTERVAL    1000000 // Check timer every 1 second
+#define SESSION_DURATION_MS 40000    // 20 seconds per session (configurable)
+#define TIMER_CHECK_INTERVAL 1000000 // Check timer every 1 second
+#define QUEUE_READY_TIMEOUT_MS 10000 // 10 seconds to respond to queue ready
 
 // State variables
 static uint8_t main_state = L3STATE_SCANNING;
 static uint8_t prev_state = main_state;
 
+// Queue Management Variables
+static uint8_t lastQueuePosition = 0;
+static uint8_t lastTotalWaiting = 0;
+
 // User and Booth Management
 static uint8_t myId;
 static uint8_t currentBoothId = 0;
-static uint8_t isAdmin = 0;  // 1: admin, 0: user
-static Booth_t myBooth;  // For admin use
+static uint8_t isAdmin = 0; // 1: admin, 0: user
+static Booth_t myBooth;     // For admin use
 static uint32_t scanningTimer = 0;
 static uint8_t waitingNumber = 0;
-static uint8_t registeredCount = 0;  // Track total registered users
-static uint8_t quietMode = 0;  // New: Quiet mode for admin broadcasts
+static uint8_t registeredCount = 0; // Track total registered users
+static uint8_t quietMode = 0;       // New: Quiet mode for admin broadcasts
 
 // Session Timer Variables (NEW)
 static uint32_t sessionTimerCounter = 0;
 static uint32_t sessionStartTime = 0;
 static uint8_t isSessionActive = 0;
+
+// Queue Management Variables (NEW)
+static uint8_t pendingUserId = 0;        // User waiting for queue ready response
+static uint32_t queueReadyStartTime = 0; // Queue ready timer
+static uint8_t isQueueReadyTimerActive = 0;
+static uint8_t myWaitingNumber = 0;   // User's waiting number
+static uint8_t totalWaitingUsers = 0; // Total users in queue
+
+static uint8_t connectRetryCount = 0;
+static uint32_t connectRequestTime = 0;
+static uint8_t isWaitingForBoothInfo = 0;
+#define CONNECT_RETRY_MAX 3
+#define CONNECT_TIMEOUT_MS 3000 // 3초 타임아웃
 
 // RSSI-based booth scanning (new)
 static BoothScanInfo_t scannedBooths[MAX_BOOTHS];
@@ -49,54 +67,61 @@ static uint8_t rxBuffer[L3_MAXDATASIZE];
 static Serial pc(USBTX, USBRX);
 
 // Function prototypes
-static void sendMessage(uint8_t msgType, uint8_t* data, uint8_t dataLen, uint8_t destId);
+static void sendMessage(uint8_t msgType, uint8_t *data, uint8_t dataLen, uint8_t destId);
 static void handleConnectRequest(uint8_t srcId);
-static void handleBoothInfo(uint8_t* data, uint8_t size);
-static void handleRegisterResponse(uint8_t* data);
-static void handleQueueInfo(uint8_t* data);
-static uint8_t checkUserInList(User_t* list, uint8_t listSize, uint8_t userId);
+static void handleBoothInfo(uint8_t *data, uint8_t size);
+static void handleRegisterResponse(uint8_t *data);
+static void handleQueueInfo(uint8_t *data);
+static uint8_t checkUserInList(User_t *list, uint8_t listSize, uint8_t userId);
 static uint8_t checkUserInRegisteredList(uint8_t userId);
-static uint8_t addUserToList(User_t* list, uint8_t* listSize, uint8_t userId);
-static void removeUserFromList(User_t* list, uint8_t* count, uint8_t userId);
+static uint8_t addUserToList(User_t *list, uint8_t *listSize, uint8_t userId);
+static void removeUserFromList(User_t *list, uint8_t *count, uint8_t userId);
 static void removeUserFromActiveList(uint8_t userId);
 static void displayBoothInfo(void);
 static void scanForBooths(void);
 static void L3service_processKeyboardInput(void);
-static void L3admin_processKeyboardInput(void);  // New function for admin input
-static void startSessionTimer(uint8_t userId);    // NEW: Start session timer
-static void checkSessionTimer(void);              // NEW: Check session timer
-static void endUserSession(uint8_t userId);       // NEW: End user session
-static void admitNextWaitingUser(void);          // NEW: Admit next waiting user
+static void L3admin_processKeyboardInput(void);      // New function for admin input
+static void startSessionTimer(uint8_t userId);       // Start session timer
+static void checkSessionTimer(void);                 // Check session timer
+static void endUserSession(uint8_t userId);          // End user session
+static void admitNextWaitingUser(void);              // Admit next waiting user
+static void removeFromWaitingQueue(uint8_t userId);  // Remove from waiting queue
+static void updateAllWaitingUsers(void);             // Update all waiting users
+static void checkQueueReadyTimeout(void);            // Check queue ready timeout
+static void handleQueueReadyTimeout(uint8_t userId); // Handle queue ready timeout
 
-// New functions for RSSI-based selection
+// RSSI-based selection
 static void initializeBoothScanList(void);
-static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCount, 
-                               uint8_t capacity, uint8_t waitingCount);
+static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCount,
+                                uint8_t capacity, uint8_t waitingCount);
 static uint8_t selectOptimalBooth(void);
 static void displayScannedBooths(void);
 
 // Initialize FSM
-void L3_initFSM(uint8_t id) {
+void L3_initFSM(uint8_t id)
+{
     myId = id;
     isAdmin = (id >= ADMIN_ID_START && id <= ADMIN_ID_END) ? 1 : 0;
-    
+
     // Initialize booth scan list
     initializeBoothScanList();
-    
-    if (isAdmin) {
+
+    if (isAdmin)
+    {
         myBooth.boothId = id;
         myBooth.capacity = MAX_BOOTH_CAPACITY;
         myBooth.currentCount = 0;
         myBooth.waitingCount = 0;
         sprintf(myBooth.description, "Booth %d - Pop-up Store Experience", id);
-        
+
         // Initialize registered user IDs array
-        for (uint8_t i = 0; i < MAX_USERS; i++) {
+        for (uint8_t i = 0; i < MAX_USERS; i++)
+        {
             myBooth.registeredUserIds[i] = 0;
             // Initialize user session data
             myBooth.activeList[i].sessionStartTime = 0;
         }
-        
+
         pc.printf("\n=== ADMIN MODE: Booth %d ===\n", id);
         pc.printf("Booth Description: %s\n", myBooth.description);
         pc.printf("Max Capacity: %d\n", myBooth.capacity);
@@ -106,104 +131,129 @@ void L3_initFSM(uint8_t id) {
         pc.printf("  's' - Show booth status\n");
         pc.printf("  'a' - Send announcement\n");
         pc.printf("  'q' - Toggle quiet mode (reduce auto broadcasts)\n");
-        pc.printf("  't' - Show session timers\n");  // NEW
+        pc.printf("  't' - Show session timers\n"); // NEW
+        pc.printf("  'w' - Show waiting queue\n");  // NEW
         pc.printf("  'h' - Show help\n\n");
-        
-        main_state = L3STATE_IN_USE;  // Admin always in USE state
-        
+
+        main_state = L3STATE_IN_USE; // Admin always in USE state
+
         // Set up keyboard interrupt for admin commands
         pc.attach(&L3admin_processKeyboardInput, Serial::RxIrq);
-        
+
         // Send initial broadcast
         uint8_t announceData[10];
-        uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId, 
-                                                      myBooth.currentCount, myBooth.capacity, 
-                                                      myBooth.waitingCount);
-        
+        uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
+                                                     myBooth.currentCount, myBooth.capacity,
+                                                     myBooth.waitingCount);
+
         pc.printf("Booth initialized. Waiting for users...\n");
         pc.printf("Sending initial broadcast...\n");
         L3_LLI_dataReqFunc(announceData, msgSize, BROADCAST_ID);
-        
-    } else {
+    }
+    else
+    {
         pc.printf("\n=== USER MODE: ID %d ===\n", id);
         pc.printf("Starting RSSI-based booth scanning...\n");
         pc.printf("Press 'e' to exit booth when inside\n");
         pc.printf("Session limit: %d seconds per booth\n", SESSION_DURATION_MS / 1000);
         main_state = L3STATE_SCANNING;
-        
+
         // Set up keyboard interrupt for exit command
         pc.attach(&L3service_processKeyboardInput, Serial::RxIrq);
-        
+
         // Start initial scan
         pc.printf("Initiating booth discovery...\n");
         isScanning = 1;
         scanResponseCount = 0;
-        
+
         // Send scan requests to all booths
-        for (uint8_t i = ADMIN_ID_START; i <= ADMIN_ID_END; i++) {
+        for (uint8_t i = ADMIN_ID_START; i <= ADMIN_ID_END; i++)
+        {
             uint8_t scanMsg[1] = {MSG_TYPE_BOOTH_SCAN};
             L3_LLI_dataReqFunc(scanMsg, 1, i);
         }
-        
+
         // Start booth selection timer
         L3_timer_boothSelectionStart();
     }
-    
+
     L3_event_clearAllEventFlag();
 }
 
 // Main FSM Run
-void L3_FSMrun(void) {
-    if (prev_state != main_state) {
+void L3_FSMrun(void)
+{
+    if (prev_state != main_state)
+    {
         debug_if(DBGMSG_L3, "[L3] State transition from %i to %i\n", prev_state, main_state);
         prev_state = main_state;
     }
-    
+
     // Check session timers (NEW)
-    if (isAdmin) {
+    if (isAdmin)
+    {
         sessionTimerCounter++;
-        if (sessionTimerCounter > TIMER_CHECK_INTERVAL) {
+        if (sessionTimerCounter > TIMER_CHECK_INTERVAL)
+        {
             sessionTimerCounter = 0;
             checkSessionTimer();
+
+            // Also check queue ready timeout
+            if (isQueueReadyTimerActive)
+            {
+                checkQueueReadyTimeout();
+            }
         }
     }
-    
+
     // Admin booth announcement (periodic)
-    if (isAdmin && !quietMode) {  // Check quiet mode
+    if (isAdmin && !quietMode)
+    { // Check quiet mode
         scanningTimer++;
-        if (scanningTimer > 5000000) {  // Increased from 1000000 to 5000000 (5x slower)
+        if (scanningTimer > 5000000)
+        { // Increased from 1000000 to 5000000 (5x slower)
             scanningTimer = 0;
             uint8_t announceData[10];
             uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
-                                                          myBooth.currentCount, myBooth.capacity,
-                                                          myBooth.waitingCount);
-            
-            pc.printf("\n[Admin] Broadcasting booth info (Users: %d/%d)...\n", 
-                     myBooth.currentCount, myBooth.capacity);
+                                                         myBooth.currentCount, myBooth.capacity,
+                                                         myBooth.waitingCount);
+
+            pc.printf("\n[Admin] Broadcasting booth info (Users: %d/%d)...\n",
+                      myBooth.currentCount, myBooth.capacity);
             L3_LLI_dataReqFunc(announceData, msgSize, BROADCAST_ID);
         }
     }
-    
+
     // Handle booth selection timeout (new)
-    if (L3_event_checkEventFlag(L3_event_boothSelectionTimeout)) {
-        if (isScanning && !isAdmin) {
+    if (L3_event_checkEventFlag(L3_event_boothSelectionTimeout))
+    {
+        if (isScanning && !isAdmin)
+        {
             isScanning = 0;
             pc.printf("\n[User] Booth selection timeout. Processing RSSI data...\n");
-            
+
             // Display all scanned booths
             displayScannedBooths();
-            
+
             // Select optimal booth based on RSSI
             uint8_t selectedBoothId = selectOptimalBooth();
-            
-            if (selectedBoothId != 0) {
+
+            if (selectedBoothId != 0)
+            {
                 currentBoothId = selectedBoothId;
                 pc.printf("\nSelected Booth %d as optimal choice\n", currentBoothId);
                 pc.printf("Connecting to Booth %d...\n", currentBoothId);
-                
+
+                // 연결 시도 초기화
+                connectRetryCount = 0;
+                isWaitingForBoothInfo = 1;
+                connectRequestTime = us_ticker_read() / 1000;
+
                 sendMessage(MSG_TYPE_CONNECT_REQUEST, NULL, 0, currentBoothId);
                 main_state = L3STATE_CONNECTED;
-            } else {
+            }
+            else
+            {
                 pc.printf("\nNo booths found. Continuing scan...\n");
                 // Reset and continue scanning
                 initializeBoothScanList();
@@ -211,276 +261,531 @@ void L3_FSMrun(void) {
         }
         L3_event_clearEventFlag(L3_event_boothSelectionTimeout);
     }
-    
+
     // Handle received messages
-    if (L3_event_checkEventFlag(L3_event_msgRcvd)) {
-        uint8_t* dataPtr = L3_LLI_getMsgPtr();
+    if (L3_event_checkEventFlag(L3_event_msgRcvd))
+    {
+        uint8_t *dataPtr = L3_LLI_getMsgPtr();
         uint8_t size = L3_LLI_getSize();
         uint8_t srcId = L3_LLI_getSrcId();
         uint8_t msgType = L3_msg_getType(dataPtr);
-        int16_t rssi = L3_LLI_getRssi();  // Get RSSI value
-        
+        int16_t rssi = L3_LLI_getRssi(); // Get RSSI value
+
+        // 모든 메시지 수신 로그 (디버깅용)
+        if (!isAdmin || msgType != MSG_TYPE_BOOTH_ANNOUNCE)
+        {
+            pc.printf("\n[%s] RX: Type=0x%02X, Src=%d, Size=%d, RSSI=%d\n",
+                      isAdmin ? "Admin" : "User", msgType, srcId, size, rssi);
+        }
+
         // Filter out broadcast messages in certain states
-        if (msgType == MSG_TYPE_BOOTH_ANNOUNCE && !isAdmin && main_state != L3STATE_SCANNING) {
+        if (msgType == MSG_TYPE_BOOTH_ANNOUNCE && !isAdmin && main_state != L3STATE_SCANNING)
+        {
             L3_event_clearEventFlag(L3_event_msgRcvd);
             return;
         }
-        
+
         // Only show debug for non-periodic messages
-        if (msgType != MSG_TYPE_BOOTH_ANNOUNCE || !isAdmin) {
-            pc.printf("[DEBUG] Received message type 0x%02X from ID %d (RSSI: %d dBm, size: %d)\n", 
-                     msgType, srcId, rssi, size);
+        if (msgType != MSG_TYPE_BOOTH_ANNOUNCE || !isAdmin)
+        {
+            pc.printf("[DEBUG] Received message type 0x%02X from ID %d (RSSI: %d dBm, size: %d)\n",
+                      msgType, srcId, rssi, size);
         }
-        
-        switch (msgType) {
-            case MSG_TYPE_TIMEOUT_ALERT:  // NEW: Handle timeout alert
-                if (!isAdmin) {
-                    pc.printf("\n⏰ [ALERT] Your session time has expired!\n");
-                    pc.printf("You are being automatically exited from the booth.\n");
-                    pc.printf("Thank you for your experience!\n");
+
+        switch (msgType)
+        {
+        case MSG_TYPE_TIMEOUT_ALERT: // NEW: Handle timeout alert
+            if (!isAdmin)
+            {
+                pc.printf("\n[ALERT] Your session time has expired!\n");
+                pc.printf("You are being automatically exited from the booth.\n");
+                pc.printf("Thank you for your experience!\n");
+
+                // Reset to scanning state
+                main_state = L3STATE_SCANNING;
+                currentBoothId = 0;
+                isSessionActive = 0;
+                sessionStartTime = 0;
+
+                // Reset scan list for new scan
+                initializeBoothScanList();
+                pc.printf("\nReturning to booth scanning mode...\n");
+            }
+            break;
+
+        case MSG_TYPE_BOOTH_SCAN:
+            if (isAdmin)
+            {
+                pc.printf("\n[Admin] Received scan request from User %d (RSSI: %d dBm)\n", srcId, rssi);
+                pc.printf("[Admin] Responding to scan request...\n");
+
+                // Respond with booth info
+                uint8_t announceData[10];
+                uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
+                                                             myBooth.currentCount, myBooth.capacity,
+                                                             myBooth.waitingCount);
+                L3_LLI_dataReqFunc(announceData, msgSize, srcId);
+
+                pc.printf("[Admin] Sent booth announce to User %d\n", srcId);
+            }
+            break;
+
+        case MSG_TYPE_USER_RESPONSE:
+            if (isAdmin)
+            {
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                uint8_t response = msgData[0];
+
+                if (response == USER_RESPONSE_YES)
+                {
+                    pc.printf("\n[Admin] User %d wants to experience the booth\n", srcId);
+                    // User will send REGISTER_REQUEST next
+                }
+                else
+                {
+                    // IC1 & C2: Success - add to both lists
+                    // Check if this is the pending user from queue
+                    if (pendingUserId == srcId && isQueueReadyTimerActive)
+                    {
+                        pc.printf("[Admin] Queue ready response received from User %d\n", srcId);
+                        // Stop queue ready timer
+                        isQueueReadyTimerActive = 0;
+                        pendingUserId = 0;
+
+                        // Remove from waiting queue
+                        removeFromWaitingQueue(srcId);
+
+                        // Update remaining waiting users
+                        if (myBooth.waitingCount > 0)
+                        {
+                            updateAllWaitingUsers();
+                        }
+                    }
+                    pc.printf("\n[Admin] User %d declined booth experience\n", srcId);
+                }
+            }
+            break;
+
+        case MSG_TYPE_ADMIN_MESSAGE:
+            if (!isAdmin)
+            {
+                char *adminMsg = (char *)L3_msg_getData(dataPtr);
+                pc.printf("\n[ADMIN BROADCAST] %s\n", adminMsg);
+            }
+            break;
+
+        case MSG_TYPE_QUEUE_LEAVE:
+            if (isAdmin)
+            {
+                pc.printf("\n[Admin] User %d leaving waiting queue\n", srcId);
+
+                // Remove from waiting queue
+                removeFromWaitingQueue(srcId);
+
+                // Update all remaining waiting users
+                updateAllWaitingUsers();
+
+                pc.printf("[Admin] Updated waiting queue. Remaining: %d users\n", myBooth.waitingCount);
+            }
+            break;
+
+        case MSG_TYPE_QUEUE_READY:
+            if (!isAdmin && main_state == L3STATE_WAITING)
+            {
+                pc.printf("\n[Alert] Your turn has arrived!\n");
+                pc.printf("You have %d seconds to enter the booth.\n", QUEUE_READY_TIMEOUT_MS / 1000);
+                pc.printf("Attempting to enter booth...\n");
+
+                // Automatically send registration request
+                sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
+            }
+            else if (!isAdmin)
+            {
+                pc.printf("\n[DEBUG] Received QUEUE_READY but not in WAITING state (current state: %d)\n", main_state);
+            }
+            break;
+
+        case MSG_TYPE_QUEUE_UPDATE:
+            if (!isAdmin && main_state == L3STATE_WAITING)
+            {
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                myWaitingNumber = msgData[0];
+                totalWaitingUsers = msgData[1];
+
+                // 대기열에서 제거된 경우 (position이 0인 경우)
+                if (myWaitingNumber == 0 || totalWaitingUsers == 0)
+                {
+                    pc.printf("\n[Notice] You have been removed from the waiting queue.\n");
+                    pc.printf("Returning to scanning mode...\n");
+                    main_state = L3STATE_SCANNING;
+                    currentBoothId = 0;
+                    initializeBoothScanList();
+                }
+                else
+                {
+                    pc.printf("\n[Queue Update] Your position: %d/%d\n", myWaitingNumber, totalWaitingUsers);
+                }
+            }
+            break;
+
+        case MSG_TYPE_EXIT_REQUEST:
+            if (isAdmin)
+            {
+                pc.printf("\n[Admin] Received exit request from User %d\n", srcId);
+
+                // Check if user is actually in the booth
+                if (checkUserInList(myBooth.activeList, myBooth.currentCount, srcId))
+                {
+                    // End user session
+                    endUserSession(srcId);
+
+                    // Send exit confirmation
+                    uint8_t exitResp[2];
+                    exitResp[0] = MSG_TYPE_EXIT_RESPONSE;
+                    exitResp[1] = 1; // Success
+                    L3_LLI_dataReqFunc(exitResp, 2, srcId);
+
+                    // Try to admit next waiting user
+                    admitNextWaitingUser();
+                }
+                else
+                {
+                    pc.printf("[Admin] Warning: User %d not in active list\n", srcId);
+                }
+            }
+            break;
+
+        case MSG_TYPE_EXIT_RESPONSE:
+            if (!isAdmin)
+            {
+                pc.printf("\n[User] Exit confirmed by booth.\n");
+            }
+            break;
+
+        case MSG_TYPE_BOOTH_ANNOUNCE:
+            if (!isAdmin && main_state == L3STATE_SCANNING && isScanning)
+            {
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                uint8_t boothId = msgData[0];
+                uint8_t currentUsers = msgData[1];
+                uint8_t capacity = msgData[2];
+                uint8_t waitingUsers = msgData[3];
+
+                pc.printf("\nBooth %d detected! RSSI: %d dBm (Users: %d/%d, Waiting: %d)\n",
+                          boothId, rssi, currentUsers, capacity, waitingUsers);
+
+                // Update booth scan info with RSSI
+                updateBoothScanInfo(boothId, rssi, currentUsers, capacity, waitingUsers);
+                scanResponseCount++;
+            }
+            break;
+
+        case MSG_TYPE_CONNECT_REQUEST:
+            if (isAdmin)
+            {
+                pc.printf("\n[Admin] Received connect request from User %d\n", srcId);
+                pc.printf("[Admin] Processing connection request...\n");
+
+                // 즉시 응답
+                handleConnectRequest(srcId);
+
+                // 전송 확인 로그
+                pc.printf("[Admin] Booth info sent to User %d successfully\n", srcId);
+            }
+            break;
+
+        case MSG_TYPE_BOOTH_INFO:
+            if (!isAdmin && main_state == L3STATE_CONNECTED)
+            {
+                pc.printf("\n[User] Received booth info from Booth %d\n", srcId);
+
+                // 연결 성공 - 플래그 초기화
+                isWaitingForBoothInfo = 0;
+                connectRetryCount = 0;
+
+                handleBoothInfo(L3_msg_getData(dataPtr), size - 1);
+            }
+            break;
+
+        case MSG_TYPE_REGISTER_REQUEST:
+            if (isAdmin)
+            {
+                pc.printf("\n[Admin] Received registration request from User %d\n", srcId);
+                pc.printf("[DEBUG] Checking registration status...\n");
+
+                uint8_t response[3];
+                uint8_t msgSize;
+
+                // Check if user is already in registered list (C2 condition)
+                uint8_t isRegistered = checkUserInRegisteredList(srcId);
+
+                if (isRegistered)
+                {
+                    // IC2: Already registered - reject
+                    msgSize = L3_msg_encodeRegisterResponse(response, 0, REGISTER_REASON_ALREADY_USED);
+                    pc.printf("User %d registration rejected - already experienced this booth!\n", srcId);
+                    L3_LLI_dataReqFunc(response, msgSize, srcId);
+                }
+                else if (myBooth.currentCount >= myBooth.capacity)
+                {
+                    // C1: Capacity full - add to waiting
+                    if (!checkUserInList(myBooth.waitingQueue, myBooth.waitingCount, srcId))
+                    {   
+                        //대기열 추가
+                        addUserToList(myBooth.waitingQueue, &myBooth.waitingCount, srcId);
+                        myBooth.waitingQueue[myBooth.waitingCount - 1].waitingNumber = myBooth.waitingCount;
+                        
+                        // REGISTER_RESPONSE를 먼저 보내야 함
+                        msgSize = L3_msg_encodeRegisterResponse(response, 0, REGISTER_REASON_FULL_WAITING);
+                        L3_LLI_dataReqFunc(response, msgSize, srcId);
+                        pc.printf("User %d registration response sent (waiting queue)\n", srcId);
+                        
+                        // 약간의 지연 후 QUEUE_INFO 전송
+                        wait_ms(100);
+                        
+                        // Then send queue info
+                        uint8_t queueData[3];
+                        uint8_t queueMsgSize = L3_msg_encodeQueueInfo(queueData, 
+                                                                    myBooth.waitingCount,  
+                                                                    myBooth.waitingCount);
+                        L3_LLI_dataReqFunc(queueData, queueMsgSize, srcId);
+                        
+                        pc.printf("User %d added to waiting queue (position: %d/%d)\n", 
+                                srcId, myBooth.waitingCount, myBooth.waitingCount);
+                    }
+                    else
+                    {   // 중복 대기열 등록 방지
+                        // 이미 대기열에 있는 경우 - 재등록 요청 무시
+                        pc.printf("[Admin] User %d already in waiting queue, ignoring duplicate request\n", srcId);
+                    }
+                }
+                else
+                {
+                    // IC1 & C2: Success - add to both lists
+                    // Check if this is the pending user from queue
+                    if (pendingUserId == srcId && isQueueReadyTimerActive)
+                    {
+                        pc.printf("[Admin] Queue ready response received from User %d\n", srcId);
+                        // Stop queue ready timer
+                        isQueueReadyTimerActive = 0;
+                        pendingUserId = 0;
+
+                        // Remove from waiting queue
+                        removeFromWaitingQueue(srcId);
+
+                        // Update remaining waiting users
+                        if (myBooth.waitingCount > 0)
+                        {
+                            updateAllWaitingUsers();
+                        }
+                    }
+                    // Add to permanent registered list
+                    myBooth.registeredUserIds[registeredCount] = srcId;
+                    myBooth.registeredList[registeredCount].userId = srcId;
+                    myBooth.registeredList[registeredCount].isRegistered = 1;
+                    registeredCount++;
+
+                    // Add to active list
+                    addUserToList(myBooth.activeList, &myBooth.currentCount, srcId);
+
+                    // Start session timer for this user (NEW)
+                    startSessionTimer(srcId);
+
+                    msgSize = L3_msg_encodeRegisterResponse(response, 1, REGISTER_REASON_SUCCESS);
+                    pc.printf("User %d successfully registered and entered booth\n", srcId);
+                    pc.printf("Session timer started (%d seconds)\n", SESSION_DURATION_MS / 1000);
+                    pc.printf("Current booth status: %d/%d users (Total registered: %d)\n",
+                              myBooth.currentCount, myBooth.capacity, registeredCount);
+
+                    L3_LLI_dataReqFunc(response, msgSize, srcId);
+                }
+            }
+            break;
+
+        case MSG_TYPE_REGISTER_RESPONSE:
+            if (!isAdmin)
+            {
+                handleRegisterResponse(L3_msg_getData(dataPtr));
+            }
+            break;
+
+        case MSG_TYPE_QUEUE_INFO:
+            if (!isAdmin)
+            {
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                uint8_t newPosition = msgData[0];
+                uint8_t newTotal = msgData[1];
+
+                // 중복 메시지 필터링
+                if (newPosition != lastQueuePosition || newTotal != lastTotalWaiting)
+                {
+                    lastQueuePosition = newPosition;
+                    lastTotalWaiting = newTotal;
+
+                    handleQueueInfo(msgData);
+
+                    // QUEUE_INFO만 받고 REGISTER_RESPONSE를 못받은 경우 대비
+                    if (main_state == L3STATE_CONNECTED) {
+                        pc.printf("[DEBUG] Transitioning to WAITING state due to QUEUE_INFO\n");
+                        main_state = L3STATE_WAITING;
+                    }
+                }
+            }
+            break;
+        }
+
+        L3_event_clearEventFlag(L3_event_msgRcvd);
+    }
+
+    // User-specific state machine
+    if (!isAdmin)
+    {
+        static uint32_t userScanTimer = 0;
+        static uint32_t sessionDisplayTimer = 0;
+        static uint32_t connectTimeoutTimer = 0;
+
+        switch (main_state)
+        {
+        case L3STATE_SCANNING:
+            // Periodic scanning
+            userScanTimer++;
+            if (userScanTimer > 800000 && !isScanning)
+            { // Scan periodically if not already scanning
+                userScanTimer = 0;
+                pc.printf("\n[User] Starting new RSSI-based scan cycle...\n");
+
+                // Reset scan info
+                initializeBoothScanList();
+                isScanning = 1;
+                scanResponseCount = 0;
+
+                // Send scan requests
+                for (uint8_t i = ADMIN_ID_START; i <= ADMIN_ID_END; i++)
+                {
+                    sendMessage(MSG_TYPE_BOOTH_SCAN, NULL, 0, i);
+                }
+
+                // Start selection timer
+                L3_timer_boothSelectionStart();
+            }
+            break;
+
+        case L3STATE_CONNECTED:
+            // BOOTH_INFO 대기 중 타임아웃 체크
+            if (isWaitingForBoothInfo)
+            {
+                connectTimeoutTimer++;
+                if (connectTimeoutTimer > 3000000)
+                { // 3초 타임아웃
+                    connectTimeoutTimer = 0;
+
+                    if (connectRetryCount < CONNECT_RETRY_MAX)
+                    {
+                        connectRetryCount++;
+                        pc.printf("\n[User] No response from booth. Retrying... (%d/%d)\n",
+                                  connectRetryCount, CONNECT_RETRY_MAX);
+
+                        // 재전송
+                        sendMessage(MSG_TYPE_CONNECT_REQUEST, NULL, 0, currentBoothId);
+                    }
+                    else
+                    {
+                        pc.printf("\n[User] Failed to connect to booth after %d attempts.\n",
+                                  CONNECT_RETRY_MAX);
+                        pc.printf("Returning to scanning mode...\n");
+
+                        // 초기화하고 스캔 모드로 복귀
+                        main_state = L3STATE_SCANNING;
+                        currentBoothId = 0;
+                        connectRetryCount = 0;
+                        isWaitingForBoothInfo = 0;
+                        initializeBoothScanList();
+                    }
+                }
+            }
+            break;
+
+        case L3STATE_WAITING:
+            // In waiting queue - show animated waiting status
+            static uint32_t waitingDotTimer = 0;
+            static uint32_t waitingAnimTimer = 0;
+            // static const char* waitingAnim[] = {"+", "-"};
+            static uint8_t animIndex = 0;
+
+            waitingAnimTimer++;
+            if (waitingAnimTimer > 1000000)
+            {
+                waitingAnimTimer = 0;
+                pc.printf("\r Waiting... Position: %d/%d   ",
+                          myWaitingNumber, totalWaitingUsers);
+                // animIndex = !animIndex;
+            }
+            break;
+
+        case L3STATE_IN_USE:
+            // Using booth - show remaining time periodically
+            sessionDisplayTimer++;
+            if (sessionDisplayTimer > 5000000 && isSessionActive)
+            { // Every 5 seconds
+                sessionDisplayTimer = 0;
+                uint32_t currentTime = us_ticker_read() / 1000;
+                uint32_t elapsedTime = currentTime - sessionStartTime;
+
+                // 오버플로우 방지
+                if (elapsedTime < SESSION_DURATION_MS)
+                {
+                    uint32_t remainingTime = (SESSION_DURATION_MS - elapsedTime) / 1000;
+                    pc.printf("\n[Info] Time remaining: %d seconds\n", remainingTime);
+                }
+                else
+                {
+                    // 세션 만료됨
+                    pc.printf("\n[Info] Session expired. Waiting for server timeout...\n");
+                    isSessionActive = 0; // 더 이상 시간 표시하지 않음
+                }
+            }
+            // 클라이언트 측 세션 타이머 체크 (백업 메커니즘) - 기존 시간 계산 재사용
+            if (isSessionActive == 0)  // 세션이 만료된 상태라면
+            {
+                uint32_t currentTime = us_ticker_read() / 1000;
+                uint32_t elapsedTime = currentTime - sessionStartTime;
+                
+                // 세션 시간 + 5초 여유시간 후 강제 전환
+                if (elapsedTime > (SESSION_DURATION_MS + 5000))
+                {
+                    pc.printf("\n[Warning] Session timeout detected on client side!\n");
+                    pc.printf("Automatically returning to scanning mode...\n");
                     
-                    // Reset to scanning state
+                    // 서버에 퇴장 요청 전송 (옵션)
+                    sendMessage(MSG_TYPE_EXIT_REQUEST, NULL, 0, currentBoothId);
+                    
+                    // 강제로 SCANNING 상태로 전환
                     main_state = L3STATE_SCANNING;
                     currentBoothId = 0;
                     isSessionActive = 0;
                     sessionStartTime = 0;
                     
-                    // Reset scan list for new scan
+                    // 스캔 리스트 초기화
                     initializeBoothScanList();
-                    pc.printf("\nReturning to booth scanning mode...\n");
-                }
-                break;
-                
-            case MSG_TYPE_BOOTH_SCAN:
-                if (isAdmin) {
-                    pc.printf("\n[Admin] Received scan request from User %d (RSSI: %d dBm)\n", srcId, rssi);
-                    pc.printf("[Admin] Responding to scan request...\n");
                     
-                    // Respond with booth info
-                    uint8_t announceData[10];
-                    uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
-                                                                  myBooth.currentCount, myBooth.capacity,
-                                                                  myBooth.waitingCount);
-                    L3_LLI_dataReqFunc(announceData, msgSize, srcId);
-                    
-                    pc.printf("[Admin] Sent booth announce to User %d\n", srcId);
+                    pc.printf("Returned to scanning mode due to session timeout.\n");
+                    pc.printf("[DEBUG] State transition: IN_USE -> SCANNING (client timeout)\n");
                 }
-                break;
-                
-            case MSG_TYPE_USER_RESPONSE:
-                if (isAdmin) {
-                    uint8_t* msgData = L3_msg_getData(dataPtr);
-                    uint8_t response = msgData[0];
-                    
-                    if (response == USER_RESPONSE_YES) {
-                        pc.printf("\n[Admin] User %d wants to experience the booth\n", srcId);
-                        // User will send REGISTER_REQUEST next
-                    } else {
-                        pc.printf("\n[Admin] User %d declined booth experience\n", srcId);
-                    }
-                }
-                break;
-                
-            case MSG_TYPE_ADMIN_MESSAGE:
-                if (!isAdmin) {
-                    char* adminMsg = (char*)L3_msg_getData(dataPtr);
-                    pc.printf("\n[ADMIN BROADCAST] %s\n", adminMsg);
-                }
-                break;
-                
-            case MSG_TYPE_EXIT_REQUEST:
-                if (isAdmin) {
-                    pc.printf("\n[Admin] Received exit request from User %d\n", srcId);
-                    
-                    // Check if user is actually in the booth
-                    if (checkUserInList(myBooth.activeList, myBooth.currentCount, srcId)) {
-                        // End user session
-                        endUserSession(srcId);
-                        
-                        // Send exit confirmation
-                        uint8_t exitResp[2];
-                        exitResp[0] = MSG_TYPE_EXIT_RESPONSE;
-                        exitResp[1] = 1;  // Success
-                        L3_LLI_dataReqFunc(exitResp, 2, srcId);
-                        
-                        // Try to admit next waiting user
-                        admitNextWaitingUser();
-                    } else {
-                        pc.printf("[Admin] Warning: User %d not in active list\n", srcId);
-                    }
-                }
-                break;
-                
-            case MSG_TYPE_EXIT_RESPONSE:
-                if (!isAdmin) {
-                    pc.printf("\n[User] Exit confirmed by booth.\n");
-                }
-                break;
-                
-            case MSG_TYPE_BOOTH_ANNOUNCE:
-                if (!isAdmin && main_state == L3STATE_SCANNING && isScanning) {
-                    uint8_t* msgData = L3_msg_getData(dataPtr);
-                    uint8_t boothId = msgData[0];
-                    uint8_t currentUsers = msgData[1];
-                    uint8_t capacity = msgData[2];
-                    uint8_t waitingUsers = msgData[3];
-                    
-                    pc.printf("\nBooth %d detected! RSSI: %d dBm (Users: %d/%d, Waiting: %d)\n", 
-                             boothId, rssi, currentUsers, capacity, waitingUsers);
-                    
-                    // Update booth scan info with RSSI
-                    updateBoothScanInfo(boothId, rssi, currentUsers, capacity, waitingUsers);
-                    scanResponseCount++;
-                }
-                break;
-                
-            case MSG_TYPE_CONNECT_REQUEST:
-                if (isAdmin) {
-                    pc.printf("\n[Admin] Received connect request from User %d\n", srcId);
-                    handleConnectRequest(srcId);
-                }
-                break;
-                
-            case MSG_TYPE_BOOTH_INFO:
-                if (!isAdmin && main_state == L3STATE_CONNECTED) {
-                    pc.printf("\n[User] Received booth info from Booth %d\n", srcId);
-                    handleBoothInfo(L3_msg_getData(dataPtr), size - 1);
-                }
-                break;
-                
-            case MSG_TYPE_REGISTER_REQUEST:
-                if (isAdmin) {
-                    pc.printf("\n[Admin] Received registration request from User %d\n", srcId);
-                    pc.printf("[DEBUG] Checking registration status...\n");
-                    
-                    uint8_t response[3];
-                    uint8_t msgSize;
-                    
-                    // Check if user is already in registered list (C2 condition)
-                    uint8_t isRegistered = checkUserInRegisteredList(srcId);
-                    
-                    if (isRegistered) {
-                        // IC2: Already registered - reject
-                        msgSize = L3_msg_encodeRegisterResponse(response, 0, REGISTER_REASON_ALREADY_USED);
-                        pc.printf("User %d registration rejected - already experienced this booth!\n", srcId);
-                    } else if (myBooth.currentCount >= myBooth.capacity) {
-                        // C1: Capacity full - add to waiting
-                        if (!checkUserInList(myBooth.waitingQueue, myBooth.waitingCount, srcId)) {
-                            addUserToList(myBooth.waitingQueue, &myBooth.waitingCount, srcId);
-                            myBooth.waitingQueue[myBooth.waitingCount - 1].waitingNumber = ++waitingNumber;
-                        }
-                        msgSize = L3_msg_encodeRegisterResponse(response, 0, REGISTER_REASON_FULL_WAITING);
-                        pc.printf("User %d added to waiting queue (number: %d)\n", srcId, waitingNumber);
-                        
-                        // Send queue info
-                        uint8_t queueData[3];
-                        uint8_t queueMsgSize = L3_msg_encodeQueueInfo(queueData, waitingNumber, myBooth.waitingCount);
-                        L3_LLI_dataReqFunc(queueData, queueMsgSize, srcId);
-                    } else {
-                        // IC1 & C2: Success - add to both lists
-                        // Add to permanent registered list
-                        myBooth.registeredUserIds[registeredCount] = srcId;
-                        myBooth.registeredList[registeredCount].userId = srcId;
-                        myBooth.registeredList[registeredCount].isRegistered = 1;
-                        registeredCount++;
-                        
-                        // Add to active list
-                        addUserToList(myBooth.activeList, &myBooth.currentCount, srcId);
-                        
-                        // Start session timer for this user (NEW)
-                        startSessionTimer(srcId);
-                        
-                        msgSize = L3_msg_encodeRegisterResponse(response, 1, REGISTER_REASON_SUCCESS);
-                        pc.printf("User %d successfully registered and entered booth\n", srcId);
-                        pc.printf("Session timer started (%d seconds)\n", SESSION_DURATION_MS / 1000);
-                        pc.printf("Current booth status: %d/%d users (Total registered: %d)\n", 
-                                 myBooth.currentCount, myBooth.capacity, registeredCount);
-                    }
-                    
-                    L3_LLI_dataReqFunc(response, msgSize, srcId);
-                }
-                break;
-                
-            case MSG_TYPE_REGISTER_RESPONSE:
-                if (!isAdmin) {
-                    handleRegisterResponse(L3_msg_getData(dataPtr));
-                }
-                break;
-                
-            case MSG_TYPE_QUEUE_INFO:
-                if (!isAdmin) {
-                    handleQueueInfo(L3_msg_getData(dataPtr));
-                }
-                break;
-        }
-        
-        L3_event_clearEventFlag(L3_event_msgRcvd);
-    }
-    
-    // User-specific state machine
-    if (!isAdmin) {
-        static uint32_t userScanTimer = 0;
-        static uint32_t sessionDisplayTimer = 0;
-        
-        switch (main_state) {
-            case L3STATE_SCANNING:
-                // Periodic scanning
-                userScanTimer++;
-                if (userScanTimer > 800000 && !isScanning) {  // Scan periodically if not already scanning
-                    userScanTimer = 0;
-                    pc.printf("\n[User] Starting new RSSI-based scan cycle...\n");
-                    
-                    // Reset scan info
-                    initializeBoothScanList();
-                    isScanning = 1;
-                    scanResponseCount = 0;
-                    
-                    // Send scan requests
-                    for (uint8_t i = ADMIN_ID_START; i <= ADMIN_ID_END; i++) {
-                        sendMessage(MSG_TYPE_BOOTH_SCAN, NULL, 0, i);
-                    }
-                    
-                    // Start selection timer
-                    L3_timer_boothSelectionStart();
-                }
-                break;
-                
-            case L3STATE_CONNECTED:
-                // Waiting for booth info and user decision
-                break;
-                
-            case L3STATE_WAITING:
-                // In waiting queue
-                static uint32_t waitingDotTimer = 0;
-                waitingDotTimer++;
-                if (waitingDotTimer > 1000000) {
-                    waitingDotTimer = 0;
-                    pc.printf(".");  // Show waiting status
-                }
-                break;
-                
-            case L3STATE_IN_USE:
-                // Using booth - show remaining time periodically (NEW)
-                sessionDisplayTimer++;
-                if (sessionDisplayTimer > 5000000 && isSessionActive) {  // Every 5 seconds
-                    sessionDisplayTimer = 0;
-                    uint32_t elapsedTime = (us_ticker_read() / 1000) - sessionStartTime;
-                    uint32_t remainingTime = (SESSION_DURATION_MS - elapsedTime) / 1000;
-                    if (remainingTime > 0) {
-                        pc.printf("\n[Info] Time remaining: %d seconds\n", remainingTime);
-                    }
-                }
-                break;
+            }
+            break;
         }
     }
 }
 
 // NEW: Start session timer for a user
-static void startSessionTimer(uint8_t userId) {
+static void startSessionTimer(uint8_t userId)
+{
     // Find user in active list and set session start time
-    for (uint8_t i = 0; i < myBooth.currentCount; i++) {
-        if (myBooth.activeList[i].userId == userId) {
-            myBooth.activeList[i].sessionStartTime = us_ticker_read() / 1000;  // Convert to ms
+    for (uint8_t i = 0; i < myBooth.currentCount; i++)
+    {
+        if (myBooth.activeList[i].userId == userId)
+        {
+            myBooth.activeList[i].sessionStartTime = us_ticker_read() / 1000; // Convert to ms
             pc.printf("[Admin] Session timer started for User %d\n", userId);
             break;
         }
@@ -488,28 +793,34 @@ static void startSessionTimer(uint8_t userId) {
 }
 
 // NEW: Check session timers for all active users
-static void checkSessionTimer(void) {
-    uint32_t currentTime = us_ticker_read() / 1000;  // Convert to ms
-    
-    for (uint8_t i = 0; i < myBooth.currentCount; i++) {
+static void checkSessionTimer(void)
+{
+    uint32_t currentTime = us_ticker_read() / 1000; // Convert to ms
+
+    for (uint8_t i = 0; i < myBooth.currentCount; i++)
+    {
         uint32_t sessionTime = currentTime - myBooth.activeList[i].sessionStartTime;
-        
-        if (sessionTime >= SESSION_DURATION_MS) {
+
+        if (sessionTime >= SESSION_DURATION_MS)
+        {
             uint8_t userId = myBooth.activeList[i].userId;
-            pc.printf("\n⏰ [Admin] Session timeout for User %d!\n", userId);
-            
+            pc.printf("\n[Admin] Session timeout for User %d!\n", userId);
+
             // Send timeout alert to user
             uint8_t timeoutMsg[2];
             timeoutMsg[0] = MSG_TYPE_TIMEOUT_ALERT;
-            timeoutMsg[1] = 0;  // Reserved
+            timeoutMsg[1] = 0; // Reserved
             L3_LLI_dataReqFunc(timeoutMsg, 2, userId);
-            
+
             // End user session
             endUserSession(userId);
-            
+
+            // 약간의 지연 후 다음 대기자 입장 (메시지 전송 안정성)
+            wait_ms(500); // 500ms 지연
+
             // Try to admit next waiting user
             admitNextWaitingUser();
-            
+
             // Restart check from beginning since array was modified
             break;
         }
@@ -517,47 +828,155 @@ static void checkSessionTimer(void) {
 }
 
 // NEW: End user session (remove from active list only)
-static void endUserSession(uint8_t userId) {
+static void endUserSession(uint8_t userId)
+{
     // Calculate session duration for logging
-    for (uint8_t i = 0; i < myBooth.currentCount; i++) {
-        if (myBooth.activeList[i].userId == userId) {
+    for (uint8_t i = 0; i < myBooth.currentCount; i++)
+    {
+        if (myBooth.activeList[i].userId == userId)
+        {
             uint32_t sessionDuration = (us_ticker_read() / 1000) - myBooth.activeList[i].sessionStartTime;
-            pc.printf("[Admin] User %d session ended. Duration: %d seconds\n", 
-                     userId, sessionDuration / 1000);
+            pc.printf("[Admin] User %d session ended. Duration: %d seconds\n",
+                      userId, sessionDuration / 1000);
             break;
         }
     }
-    
+
     // Remove from active list only (keep in registered list)
     removeUserFromActiveList(userId);
-    
-    pc.printf("[Admin] User %d has exited. Current users: %d/%d\n", 
-             userId, myBooth.currentCount, myBooth.capacity);
+
+    pc.printf("[Admin] User %d has exited. Current users: %d/%d\n",
+              userId, myBooth.currentCount, myBooth.capacity);
 }
 
-// NEW: Admit next waiting user (placeholder for now)
-static void admitNextWaitingUser(void) {
-    if (myBooth.waitingCount > 0) {
-        pc.printf("[Admin] Checking waiting queue (%d users waiting)...\n", myBooth.waitingCount);
-        
-        // TODO: Implement waiting queue processing
-        // For now, just log that we need to implement this
-        pc.printf("[Admin] TODO: Send notification to next waiting user\n");
-        pc.printf("[Admin] Waiting queue processing will be implemented in next phase\n");
-        
-        // Basic placeholder logic:
-        // 1. Get first user from waiting queue
-        // 2. Check if they're still near the booth (need to wait for their registration request)
-        // 3. If yes, admit them
-        // 4. If no, skip to next in queue
+// NEW: Admit next waiting user (Pull-based implementation)
+static void admitNextWaitingUser(void)
+{
+    if (myBooth.waitingCount > 0 && !isQueueReadyTimerActive)
+    {
+        // Get first user in waiting queue
+        uint8_t nextUserId = myBooth.waitingQueue[0].userId;
+
+        pc.printf("\n[Admin] Preparing to notify User %d (waiting queue position 1)\n", nextUserId);
+        pc.printf("[Admin] Current waiting queue size: %d\n", myBooth.waitingCount);
+
+        // Send QUEUE_READY message
+        uint8_t readyMsg[2];
+        readyMsg[0] = MSG_TYPE_QUEUE_READY;
+        readyMsg[1] = 0; // Reserved
+
+        pc.printf("[Admin] Sending QUEUE_READY (0x%02X) to User %d\n", MSG_TYPE_QUEUE_READY, nextUserId);
+        L3_LLI_dataReqFunc(readyMsg, 2, nextUserId);
+
+        // Start queue ready timer
+        pendingUserId = nextUserId;
+        queueReadyStartTime = us_ticker_read() / 1000; // Convert to ms
+        isQueueReadyTimerActive = 1;
+
+        pc.printf("[Admin] Queue ready timer started for User %d (%d seconds timeout)\n",
+                  nextUserId, QUEUE_READY_TIMEOUT_MS / 1000);
+    }
+    else
+    {
+        pc.printf("[Admin] No users in waiting queue to admit\n");
     }
 }
 
+// NEW: Remove user from waiting queue
+static void removeFromWaitingQueue(uint8_t userId)
+{
+    uint8_t found = 0;
+
+    // Find and remove user
+    for (uint8_t i = 0; i < myBooth.waitingCount; i++)
+    {
+        if (myBooth.waitingQueue[i].userId == userId)
+        {
+            found = 1;
+            // Shift remaining users forward
+            for (uint8_t j = i; j < myBooth.waitingCount - 1; j++)
+            {
+                myBooth.waitingQueue[j] = myBooth.waitingQueue[j + 1];
+            }
+            myBooth.waitingCount--;
+            break;
+        }
+    }
+
+    if (found)
+    {
+        pc.printf("[Admin] Removed User %d from waiting queue\n", userId);
+    }
+}
+
+// NEW: Update all waiting users with their new positions
+static void updateAllWaitingUsers(void)
+{
+    for (uint8_t i = 0; i < myBooth.waitingCount; i++)
+    {
+        uint8_t updateMsg[3];
+        updateMsg[0] = MSG_TYPE_QUEUE_UPDATE;
+        updateMsg[1] = i + 1;                // Position (1-based)
+        updateMsg[2] = myBooth.waitingCount; // Total waiting
+
+        L3_LLI_dataReqFunc(updateMsg, 3, myBooth.waitingQueue[i].userId);
+
+        pc.printf("[Admin] Updated User %d: Position %d/%d\n",
+                  myBooth.waitingQueue[i].userId, i + 1, myBooth.waitingCount);
+    }
+}
+
+// NEW: Check queue ready timeout
+static void checkQueueReadyTimeout(void)
+{
+    if (isQueueReadyTimerActive)
+    {
+        uint32_t currentTime = us_ticker_read() / 1000;
+        uint32_t elapsedTime = currentTime - queueReadyStartTime;
+
+        if (elapsedTime >= QUEUE_READY_TIMEOUT_MS)
+        {
+            handleQueueReadyTimeout(pendingUserId);
+        }
+    }
+}
+
+// NEW: Handle queue ready timeout
+static void handleQueueReadyTimeout(uint8_t userId)
+{
+    pc.printf("\n[Admin] User %d did not respond in time. Moving to next...\n", userId);
+
+    // Stop timer
+    isQueueReadyTimerActive = 0;
+    pendingUserId = 0;
+
+    // Send removal notification to the user
+    uint8_t removalMsg[3];
+    removalMsg[0] = MSG_TYPE_QUEUE_UPDATE;
+    removalMsg[1] = 0; // Position 0 = removed
+    removalMsg[2] = 0; // Total 0 = removed
+    L3_LLI_dataReqFunc(removalMsg, 3, userId);
+
+    // Remove from waiting queue
+    removeFromWaitingQueue(userId);
+
+    // Update all waiting users
+    if (myBooth.waitingCount > 0)
+    {
+        updateAllWaitingUsers();
+    }
+
+    // Try next waiting user
+    admitNextWaitingUser();
+}
+
 // New function: Initialize booth scan list
-static void initializeBoothScanList(void) {
-    for (uint8_t i = 0; i < MAX_BOOTHS; i++) {
+static void initializeBoothScanList(void)
+{
+    for (uint8_t i = 0; i < MAX_BOOTHS; i++)
+    {
         scannedBooths[i].boothId = 0;
-        scannedBooths[i].rssi = -127;  // Minimum RSSI
+        scannedBooths[i].rssi = -127; // Minimum RSSI
         scannedBooths[i].currentCount = 0;
         scannedBooths[i].capacity = 0;
         scannedBooths[i].waitingCount = 0;
@@ -567,11 +986,14 @@ static void initializeBoothScanList(void) {
 }
 
 // New function: Update booth scan info with RSSI
-static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCount, 
-                               uint8_t capacity, uint8_t waitingCount) {
+static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCount,
+                                uint8_t capacity, uint8_t waitingCount)
+{
     // Find booth in scan list or add new entry
-    for (uint8_t i = 0; i < MAX_BOOTHS; i++) {
-        if (scannedBooths[i].boothId == boothId || !scannedBooths[i].isValid) {
+    for (uint8_t i = 0; i < MAX_BOOTHS; i++)
+    {
+        if (scannedBooths[i].boothId == boothId || !scannedBooths[i].isValid)
+        {
             scannedBooths[i].boothId = boothId;
             scannedBooths[i].rssi = rssi;
             scannedBooths[i].currentCount = currentCount;
@@ -584,168 +1006,204 @@ static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCo
 }
 
 // New function: Select optimal booth based on RSSI and availability
-static uint8_t selectOptimalBooth(void) {
+static uint8_t selectOptimalBooth(void)
+{
     uint8_t bestBoothId = 0;
-    int16_t bestScore = -1000;  // Initialize with very low score
-    
+    int16_t bestScore = -1000; // Initialize with very low score
+
     pc.printf("\n[User] Analyzing booth options...\n");
-    
-    for (uint8_t i = 0; i < MAX_BOOTHS; i++) {
-        if (scannedBooths[i].isValid) {
+
+    for (uint8_t i = 0; i < MAX_BOOTHS; i++)
+    {
+        if (scannedBooths[i].isValid)
+        {
             // Calculate score based on:
             // 1. RSSI (signal strength) - primary factor
             // 2. Available space - secondary factor
             // 3. Waiting queue - penalty factor
-            
-            int16_t score = scannedBooths[i].rssi;  // Base score is RSSI
-            
+
+            int16_t score = scannedBooths[i].rssi; // Base score is RSSI
+
             // Add bonus for available space
             uint8_t availableSpace = scannedBooths[i].capacity - scannedBooths[i].currentCount;
-            if (availableSpace > 0) {
-                score += 20;  // Bonus for immediate availability
+            if (availableSpace > 0)
+            {
+                score += 20; // Bonus for immediate availability
             }
-            
+
             // Penalty for waiting queue
             score -= (scannedBooths[i].waitingCount * 10);
-            
+
             pc.printf("  Booth %d: RSSI=%d, Score=%d (Available=%d/%d, Queue=%d)\n",
-                     scannedBooths[i].boothId, scannedBooths[i].rssi, score,
-                     availableSpace, scannedBooths[i].capacity,
-                     scannedBooths[i].waitingCount);
-            
-            if (score > bestScore) {
+                      scannedBooths[i].boothId, scannedBooths[i].rssi, score,
+                      availableSpace, scannedBooths[i].capacity,
+                      scannedBooths[i].waitingCount);
+
+            if (score > bestScore)
+            {
                 bestScore = score;
                 bestBoothId = scannedBooths[i].boothId;
             }
         }
     }
-    
+
     return bestBoothId;
 }
 
 // New function: Display all scanned booths
-static void displayScannedBooths(void) {
+static void displayScannedBooths(void)
+{
     pc.printf("\n=== SCANNED BOOTHS (RSSI-based) ===\n");
     uint8_t foundCount = 0;
-    
-    for (uint8_t i = 0; i < MAX_BOOTHS; i++) {
-        if (scannedBooths[i].isValid) {
+
+    for (uint8_t i = 0; i < MAX_BOOTHS; i++)
+    {
+        if (scannedBooths[i].isValid)
+        {
             pc.printf("Booth %d: RSSI=%d dBm, Users=%d/%d, Waiting=%d\n",
-                     scannedBooths[i].boothId,
-                     scannedBooths[i].rssi,
-                     scannedBooths[i].currentCount,
-                     scannedBooths[i].capacity,
-                     scannedBooths[i].waitingCount);
+                      scannedBooths[i].boothId,
+                      scannedBooths[i].rssi,
+                      scannedBooths[i].currentCount,
+                      scannedBooths[i].capacity,
+                      scannedBooths[i].waitingCount);
             foundCount++;
         }
     }
-    
-    if (foundCount == 0) {
+
+    if (foundCount == 0)
+    {
         pc.printf("No booths detected.\n");
     }
     pc.printf("===================================\n");
 }
 
 // Helper Functions
-static void sendMessage(uint8_t msgType, uint8_t* data, uint8_t dataLen, uint8_t destId) {
+static void sendMessage(uint8_t msgType, uint8_t *data, uint8_t dataLen, uint8_t destId)
+{
     txBuffer[0] = msgType;
-    if (data && dataLen > 0) {
+    if (data && dataLen > 0)
+    {
         memcpy(txBuffer + 1, data, dataLen);
     }
-    
+
     // Only show debug for non-periodic messages
-    if (msgType != MSG_TYPE_BOOTH_ANNOUNCE) {
+    if (msgType != MSG_TYPE_BOOTH_ANNOUNCE)
+    {
         pc.printf("[DEBUG] Sending message type 0x%02X to ID %d (size: %d)\n", msgType, destId, dataLen + 1);
     }
-    
+
     L3_LLI_dataReqFunc(txBuffer, dataLen + 1, destId);
 }
 
-static void handleConnectRequest(uint8_t srcId) {
+static void handleConnectRequest(uint8_t srcId)
+{
     // Send booth info
     uint8_t infoData[60];
     uint8_t msgSize = L3_msg_encodeBoothInfo(infoData, myBooth.currentCount, myBooth.capacity,
-                                              myBooth.waitingCount, myBooth.description);
-    
+                                             myBooth.waitingCount, myBooth.description);
+
     pc.printf("[Admin] Sending booth info to user %d\n", srcId);
     L3_LLI_dataReqFunc(infoData, msgSize, srcId);
 }
 
-static void handleBoothInfo(uint8_t* data, uint8_t size) {
+static void handleBoothInfo(uint8_t *data, uint8_t size)
+{
     uint8_t currentUsers = data[0];
     uint8_t capacity = data[1];
     uint8_t waitingUsers = data[2];
-    char* description = (char*)(data + 3);
-    
+    char *description = (char *)(data + 3);
+
     pc.printf("\n=== BOOTH INFORMATION ===\n");
     pc.printf("Description: %s\n", description);
     pc.printf("Current users: %d/%d\n", currentUsers, capacity);
     pc.printf("Waiting users: %d\n", waitingUsers);
-    pc.printf("Session duration: %d seconds\n", SESSION_DURATION_MS / 1000);  // NEW
+    pc.printf("Session duration: %d seconds\n", SESSION_DURATION_MS / 1000); // NEW
     pc.printf("\nWould you like to experience this booth? (y/n): ");
-    
+
     // Wait for user input
     L3_event_setEventFlag(L3_event_keyboardInput);
     // State will be handled in keyboard input handler
 }
 
-static void handleRegisterResponse(uint8_t* data) {
+static void handleRegisterResponse(uint8_t *data)
+{
     uint8_t success = data[0];
     uint8_t reason = data[1];
-    
-    if (success) {
+
+    if (success)
+    {
         pc.printf("\nRegistration successful! Welcome to the booth!\n");
         pc.printf("Your experience session has started.\n");
-        pc.printf("Session duration: %d seconds\n", SESSION_DURATION_MS / 1000);  // NEW
+        pc.printf("Session duration: %d seconds\n", SESSION_DURATION_MS / 1000); // NEW
         pc.printf("Press 'e' to exit the booth early.\n");
         main_state = L3STATE_IN_USE;
-        
+
         // Start user's own session timer (NEW)
         isSessionActive = 1;
-        sessionStartTime = us_ticker_read() / 1000;  // Convert to ms
-    } else {
-        if (reason == REGISTER_REASON_ALREADY_USED) {
+        sessionStartTime = us_ticker_read() / 1000; // Convert to ms
+    }
+    else
+    {
+        if (reason == REGISTER_REASON_ALREADY_USED)
+        {
             pc.printf("\nRegistration failed: You have already experienced this booth.\n");
             pc.printf("Each user can only experience a booth once.\n");
             pc.printf("Returning to scanning mode...\n");
+
+            // 재체험 불가 시 SCANNING 상태로 전환
             main_state = L3STATE_SCANNING;
             currentBoothId = 0;
-            
+
             // Reset scan list for new scan
             initializeBoothScanList();
-        } else if (reason == REGISTER_REASON_FULL_WAITING) {
-            pc.printf("\n⏳ Booth is full. You have been added to the waiting queue.\n");
+        }
+        else if (reason == REGISTER_REASON_FULL_WAITING)
+        {
+            pc.printf("\nBooth is full. You have been added to the waiting queue.\n");
+            // 대기열 등록 시 즉시 WAITING 상태로 전환
             main_state = L3STATE_WAITING;
+            // QUEUE_INFO 메시지가 오면 대기 번호 정보를 받게 됨
         }
     }
 }
 
-static void handleQueueInfo(uint8_t* data) {
-    uint8_t queueNumber = data[0];
-    uint8_t totalWaiting = data[1];
-    
-    pc.printf("Your waiting number: %d (Total waiting: %d)\n", queueNumber, totalWaiting);
+static void handleQueueInfo(uint8_t *data)
+{
+    myWaitingNumber = data[0];
+    totalWaitingUsers = data[1];
+
+    pc.printf("\nYou are in the waiting queue.\n");
+    pc.printf("Your position: %d/%d\n", myWaitingNumber, totalWaitingUsers);
+    pc.printf("Please stay near the booth to enter when your turn arrives.\n");
+    pc.printf("Press 'e' to leave the queue.\n");
 }
 
-static uint8_t checkUserInList(User_t* list, uint8_t listSize, uint8_t userId) {
-    for (uint8_t i = 0; i < listSize; i++) {
-        if (list[i].userId == userId) {
+static uint8_t checkUserInList(User_t *list, uint8_t listSize, uint8_t userId)
+{
+    for (uint8_t i = 0; i < listSize; i++)
+    {
+        if (list[i].userId == userId)
+        {
             return 1;
         }
     }
     return 0;
 }
 
-static uint8_t addUserToList(User_t* list, uint8_t* count, uint8_t userId) {
+static uint8_t addUserToList(User_t *list, uint8_t *count, uint8_t userId)
+{
     // First check if already in list
-    for (uint8_t i = 0; i < *count; i++) {
-        if (list[i].userId == userId) {
-            return 1;  // Already in list
+    for (uint8_t i = 0; i < *count; i++)
+    {
+        if (list[i].userId == userId)
+        {
+            return 1; // Already in list
         }
     }
-    
+
     // Add new user
-    if (*count < MAX_USERS) {
+    if (*count < MAX_USERS)
+    {
         list[*count].userId = userId;
         list[*count].isActive = 1;
         (*count)++;
@@ -754,11 +1212,15 @@ static uint8_t addUserToList(User_t* list, uint8_t* count, uint8_t userId) {
     return 0;
 }
 
-static void removeUserFromList(User_t* list, uint8_t* count, uint8_t userId) {
-    for (uint8_t i = 0; i < *count; i++) {
-        if (list[i].userId == userId) {
+static void removeUserFromList(User_t *list, uint8_t *count, uint8_t userId)
+{
+    for (uint8_t i = 0; i < *count; i++)
+    {
+        if (list[i].userId == userId)
+        {
             // Shift remaining elements
-            for (uint8_t j = i; j < *count - 1; j++) {
+            for (uint8_t j = i; j < *count - 1; j++)
+            {
                 list[j] = list[j + 1];
             }
             (*count)--;
@@ -768,9 +1230,12 @@ static void removeUserFromList(User_t* list, uint8_t* count, uint8_t userId) {
 }
 
 // Check if user is in registered list (permanent record)
-static uint8_t checkUserInRegisteredList(uint8_t userId) {
-    for (uint8_t i = 0; i < registeredCount; i++) {
-        if (myBooth.registeredUserIds[i] == userId) {
+static uint8_t checkUserInRegisteredList(uint8_t userId)
+{
+    for (uint8_t i = 0; i < registeredCount; i++)
+    {
+        if (myBooth.registeredUserIds[i] == userId)
+        {
             pc.printf("[DEBUG] User %d found in registered list at index %d\n", userId, i);
             return 1;
         }
@@ -780,65 +1245,91 @@ static uint8_t checkUserInRegisteredList(uint8_t userId) {
 }
 
 // Remove user from active list only
-static void removeUserFromActiveList(uint8_t userId) {
+static void removeUserFromActiveList(uint8_t userId)
+{
     removeUserFromList(myBooth.activeList, &myBooth.currentCount, userId);
 }
 
 // Keyboard input handler for user commands
-static void L3service_processKeyboardInput(void) {
+static void L3service_processKeyboardInput(void)
+{
     char c = pc.getc();
-    
+
     // Handle booth selection response
-    if (L3_event_checkEventFlag(L3_event_keyboardInput) && main_state == L3STATE_CONNECTED) {
-        if (c == 'y' || c == 'Y') {
+    if (L3_event_checkEventFlag(L3_event_keyboardInput) && main_state == L3STATE_CONNECTED)
+    {
+        if (c == 'y' || c == 'Y')
+        {
             pc.printf("y\n");
-            
+
             // Send USER_RESPONSE first (according to protocol)
             uint8_t responseMsg[2];
             L3_msg_encodeUserResponse(responseMsg, USER_RESPONSE_YES);
             L3_LLI_dataReqFunc(responseMsg, 2, currentBoothId);
-            
+
             // Then send registration request
             pc.printf("Sending registration request...\n");
             sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
             L3_event_clearEventFlag(L3_event_keyboardInput);
-        } else if (c == 'n' || c == 'N') {
+        }
+        else if (c == 'n' || c == 'N')
+        {
             pc.printf("n\n");
-            
+
             // Send USER_RESPONSE NO
             uint8_t responseMsg[2];
             L3_msg_encodeUserResponse(responseMsg, USER_RESPONSE_NO);
             L3_LLI_dataReqFunc(responseMsg, 2, currentBoothId);
-            
+
             pc.printf("Declined. Returning to scanning mode...\n");
             main_state = L3STATE_SCANNING;
             currentBoothId = 0;
             L3_event_clearEventFlag(L3_event_keyboardInput);
-            
+
             // Reset scan list for new scan
             initializeBoothScanList();
         }
         return;
     }
-    
+
     // Handle exit command
-    if (c == 'e' || c == 'E') {
-        if (!isAdmin && main_state == L3STATE_IN_USE) {
+    if (c == 'e' || c == 'E')
+    {
+        if (!isAdmin && main_state == L3STATE_IN_USE)
+        {
             // Calculate and display session duration
-            if (isSessionActive) {
+            if (isSessionActive)
+            {
                 uint32_t sessionDuration = (us_ticker_read() / 1000) - sessionStartTime;
                 pc.printf("\nExiting booth... Session duration: %d seconds\n", sessionDuration / 1000);
                 isSessionActive = 0;
+                sessionStartTime = 0;
             }
-            
+
             sendMessage(MSG_TYPE_EXIT_REQUEST, NULL, 0, currentBoothId);
-            
+
             // Don't wait for response, immediately return to scanning
             pc.printf("Exited the booth.\n");
             pc.printf("Returning to RSSI-based scanning mode...\n");
             main_state = L3STATE_SCANNING;
             currentBoothId = 0;
-            
+
+            // Reset scan list for new scan
+            initializeBoothScanList();
+        }
+        else if (!isAdmin && main_state == L3STATE_WAITING)
+        {
+            // Leave waiting queue
+            pc.printf("\nLeaving waiting queue...\n");
+
+            sendMessage(MSG_TYPE_QUEUE_LEAVE, NULL, 0, currentBoothId);
+
+            pc.printf("Left the queue. Returning to scanning mode...\n");
+            main_state = L3STATE_SCANNING;
+            currentBoothId = 0;
+            myWaitingNumber = 0;
+            totalWaitingUsers = 0;
+
             // Reset scan list for new scan
             initializeBoothScanList();
         }
@@ -846,139 +1337,202 @@ static void L3service_processKeyboardInput(void) {
 }
 
 // Keyboard input handler for admin commands (new)
-static void L3admin_processKeyboardInput(void) {
-    static char msgBuffer[101];  // Buffer for custom message
+static void L3admin_processKeyboardInput(void)
+{
+    static char msgBuffer[101]; // Buffer for custom message
     static uint8_t msgIndex = 0;
     static uint8_t isTypingMessage = 0;
-    
+
     char c = pc.getc();
-    
-    if (isTypingMessage) {
+
+    if (isTypingMessage)
+    {
         // Collecting custom message
-        if (c == '\r' || c == '\n') {
+        if (c == '\r' || c == '\n')
+        {
             // Message complete
             msgBuffer[msgIndex] = '\0';
-            
-            if (msgIndex > 0) {
-                pc.printf("\nBroadcasting: \"%s\"\n", msgBuffer);
+
+            if (msgIndex > 0)
+            {
+                // 활성 사용자에게만 전송
+                pc.printf("\nBroadcasting to active users: \"%s\"\n", msgBuffer);
                 
-                // Send admin message
                 uint8_t adminMsg[110];
                 uint8_t msgSize = L3_msg_encodeAdminMessage(adminMsg, msgBuffer);
-                L3_LLI_dataReqFunc(adminMsg, msgSize, BROADCAST_ID);
                 
-                pc.printf("Message sent to all users!\n\n");
+                // 활성 사용자에게만 전송
+                if (myBooth.currentCount > 0)
+                {
+                    for (uint8_t i = 0; i < myBooth.currentCount; i++)
+                    {
+                        L3_LLI_dataReqFunc(adminMsg, msgSize, myBooth.activeList[i].userId);
+                        pc.printf("Message sent to User %d\n", myBooth.activeList[i].userId);
+                    }
+                    pc.printf("Total %d active user(s) received the message.\n\n", myBooth.currentCount);
+                }
+                else
+                {
+                    pc.printf("No active users in booth.\n\n");
+                }
             }
-            
+
             // Reset
             isTypingMessage = 0;
             msgIndex = 0;
-        } else if (c == '\b' || c == 127) {
+        }
+        else if (c == '\b' || c == 127)
+        {
             // Backspace
-            if (msgIndex > 0) {
+            if (msgIndex > 0)
+            {
                 msgIndex--;
-                pc.printf("\b \b");  // Erase character from terminal
+                pc.printf("\b \b"); // Erase character from terminal
             }
-        } else if (msgIndex < 100) {
+        }
+        else if (msgIndex < 100)
+        {
             // Add character to buffer
             msgBuffer[msgIndex++] = c;
-            pc.putc(c);  // Echo character
+            pc.putc(c); // Echo character
         }
-    } else {
+    }
+    else
+    {
         // Command mode
-        switch (c) {
-            case 'm':
-            case 'M':
-                pc.printf("\nEnter broadcast message (max 100 chars): ");
-                isTypingMessage = 1;
-                msgIndex = 0;
-                break;
-                
-            case 's':
-            case 'S':
-                pc.printf("\n=== BOOTH STATUS ===\n");
-                pc.printf("Booth ID: %d\n", myBooth.boothId);
-                pc.printf("Current Users: %d/%d\n", myBooth.currentCount, myBooth.capacity);
-                pc.printf("Waiting Queue: %d users\n", myBooth.waitingCount);
-                pc.printf("Total Registered: %d users\n", registeredCount);
-                pc.printf("Session Duration: %d seconds\n", SESSION_DURATION_MS / 1000);
-                
-                if (myBooth.currentCount > 0) {
-                    pc.printf("\nActive Users:\n");
-                    uint32_t currentTime = us_ticker_read() / 1000;
-                    for (uint8_t i = 0; i < myBooth.currentCount; i++) {
-                        uint32_t sessionTime = (currentTime - myBooth.activeList[i].sessionStartTime) / 1000;
-                        uint32_t remainingTime = (SESSION_DURATION_MS / 1000) - sessionTime;
-                        pc.printf("  - User %d (Time remaining: %d sec)\n", 
-                                 myBooth.activeList[i].userId, remainingTime);
-                    }
+        switch (c)
+        {
+        case 'm':
+        case 'M':
+            pc.printf("\nEnter broadcast message (max 100 chars): ");
+            isTypingMessage = 1;
+            msgIndex = 0;
+            break;
+
+        case 's':
+        case 'S':
+            pc.printf("\n=== BOOTH STATUS ===\n");
+            pc.printf("Booth ID: %d\n", myBooth.boothId);
+            pc.printf("Current Users: %d/%d\n", myBooth.currentCount, myBooth.capacity);
+            pc.printf("Waiting Queue: %d users\n", myBooth.waitingCount);
+            pc.printf("Total Registered: %d users\n", registeredCount);
+            pc.printf("Session Duration: %d seconds\n", SESSION_DURATION_MS / 1000);
+
+            if (myBooth.currentCount > 0)
+            {
+                pc.printf("\nActive Users:\n");
+                uint32_t currentTime = us_ticker_read() / 1000;
+                for (uint8_t i = 0; i < myBooth.currentCount; i++)
+                {
+                    uint32_t sessionTime = (currentTime - myBooth.activeList[i].sessionStartTime) / 1000;
+                    uint32_t remainingTime = (SESSION_DURATION_MS / 1000) - sessionTime;
+                    pc.printf("  - User %d (Time remaining: %d sec)\n",
+                              myBooth.activeList[i].userId, remainingTime);
                 }
-                
-                if (registeredCount > 0) {
-                    pc.printf("\nRegistered Users (all-time):\n");
-                    for (uint8_t i = 0; i < registeredCount; i++) {
-                        pc.printf("  - User %d\n", myBooth.registeredUserIds[i]);
-                    }
-                }
-                pc.printf("==================\n\n");
-                break;
-                
-            case 't':  // NEW: Show timer status
-            case 'T':
-                pc.printf("\n=== SESSION TIMERS ===\n");
-                if (myBooth.currentCount > 0) {
-                    uint32_t currentTime = us_ticker_read() / 1000;
-                    for (uint8_t i = 0; i < myBooth.currentCount; i++) {
-                        uint32_t elapsedTime = (currentTime - myBooth.activeList[i].sessionStartTime) / 1000;
-                        uint32_t remainingTime = (SESSION_DURATION_MS / 1000) - elapsedTime;
-                        
-                        pc.printf("User %d: ", myBooth.activeList[i].userId);
-                        if (remainingTime > 0) {
-                            pc.printf("%d seconds remaining", remainingTime);
-                            if (remainingTime < 10) {
-                                pc.printf(" ⚠️ EXPIRING SOON!");
-                            }
-                        } else {
-                            pc.printf("EXPIRED!");
-                        }
-                        pc.printf("\n");
-                    }
-                } else {
-                    pc.printf("No active users.\n");
-                }
-                pc.printf("====================\n\n");
-                break;
-                
-            case 'a':
-            case 'A': {
-                pc.printf("\nSending booth announcement...\n");
-                uint8_t announceData[10];
-                uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
-                                                              myBooth.currentCount, myBooth.capacity,
-                                                              myBooth.waitingCount);
-                L3_LLI_dataReqFunc(announceData, msgSize, BROADCAST_ID);
-                pc.printf("Announcement sent!\n\n");
-                break;
             }
-                
-            case 'q':
-            case 'Q':
-                quietMode = !quietMode;
-                pc.printf("\nQuiet mode: %s\n", quietMode ? "ON (auto-broadcasts disabled)" : "OFF (auto-broadcasts enabled)");
-                pc.printf("Manual broadcasts with 'a' still work in quiet mode.\n\n");
-                break;
-                
-            case 'h':
-            case 'H':
-                pc.printf("\n=== ADMIN COMMANDS ===\n");
-                pc.printf("  'm' - Send custom broadcast message\n");
-                pc.printf("  's' - Show booth status\n");
-                pc.printf("  'a' - Send announcement\n");
-                pc.printf("  'q' - Toggle quiet mode\n");
-                pc.printf("  't' - Show session timers\n");
-                pc.printf("  'h' - Show this help\n");
-                pc.printf("====================\n\n");
-                break;
+
+            if (registeredCount > 0)
+            {
+                pc.printf("\nRegistered Users (all-time):\n");
+                for (uint8_t i = 0; i < registeredCount; i++)
+                {
+                    pc.printf("  - User %d\n", myBooth.registeredUserIds[i]);
+                }
+            }
+            pc.printf("==================\n\n");
+            break;
+
+        case 't': // NEW: Show timer status
+        case 'T':
+            pc.printf("\n=== SESSION TIMERS ===\n");
+            if (myBooth.currentCount > 0)
+            {
+                uint32_t currentTime = us_ticker_read() / 1000;
+                for (uint8_t i = 0; i < myBooth.currentCount; i++)
+                {
+                    uint32_t elapsedTime = (currentTime - myBooth.activeList[i].sessionStartTime) / 1000;
+                    uint32_t remainingTime = (SESSION_DURATION_MS / 1000) - elapsedTime;
+
+                    pc.printf("User %d: ", myBooth.activeList[i].userId);
+                    if (remainingTime > 0)
+                    {
+                        pc.printf("%d seconds remaining", remainingTime);
+                        if (remainingTime < 10)
+                        {
+                            pc.printf(" ⚠️ EXPIRING SOON!");
+                        }
+                    }
+                    else
+                    {
+                        pc.printf("EXPIRED!");
+                    }
+                    pc.printf("\n");
+                }
+            }
+            else
+            {
+                pc.printf("No active users.\n");
+            }
+            pc.printf("====================\n\n");
+            break;
+
+        case 'a':
+        case 'A':
+        {
+            pc.printf("\nSending booth announcement...\n");
+            uint8_t announceData[10];
+            uint8_t msgSize = L3_msg_encodeBoothAnnounce(announceData, myBooth.boothId,
+                                                         myBooth.currentCount, myBooth.capacity,
+                                                         myBooth.waitingCount);
+            L3_LLI_dataReqFunc(announceData, msgSize, BROADCAST_ID);
+            pc.printf("Announcement sent!\n\n");
+            break;
+        }
+
+        case 'q':
+        case 'Q':
+            quietMode = !quietMode;
+            pc.printf("\nQuiet mode: %s\n", quietMode ? "ON (auto-broadcasts disabled)" : "OFF (auto-broadcasts enabled)");
+            pc.printf("Manual broadcasts with 'a' still work in quiet mode.\n\n");
+            break;
+
+        case 'w':
+        case 'W':
+            pc.printf("\n=== WAITING QUEUE ===\n");
+            if (myBooth.waitingCount > 0)
+            {
+                pc.printf("Waiting users: %d\n", myBooth.waitingCount);
+                for (uint8_t i = 0; i < myBooth.waitingCount; i++)
+                {
+                    pc.printf("  %d. User %d", i + 1, myBooth.waitingQueue[i].userId);
+                    if (i == 0 && isQueueReadyTimerActive)
+                    {
+                        uint32_t elapsed = (us_ticker_read() / 1000 - queueReadyStartTime) / 1000;
+                        uint32_t remaining = (QUEUE_READY_TIMEOUT_MS / 1000) - elapsed;
+                        pc.printf(" (Notified - %d sec remaining)", remaining);
+                    }
+                    pc.printf("\n");
+                }
+            }
+            else
+            {
+                pc.printf("No users waiting.\n");
+            }
+            pc.printf("===================\n\n");
+            break;
+
+        case 'h':
+        case 'H':
+            pc.printf("\n=== ADMIN COMMANDS ===\n");
+            pc.printf("  'm' - Send custom broadcast message\n");
+            pc.printf("  's' - Show booth status\n");
+            pc.printf("  'a' - Send announcement\n");
+            pc.printf("  'q' - Toggle quiet mode\n");
+            pc.printf("  't' - Show session timers\n");
+            pc.printf("  'w' - Show waiting queue\n");
+            pc.printf("  'h' - Show this help\n");
+            pc.printf("====================\n\n");
+            break;
         }
     }
 }

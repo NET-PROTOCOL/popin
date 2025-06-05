@@ -16,10 +16,25 @@ uint8_t input_destId=0;
 int main(void){
 
     //initialization
+    pc.baud(9600);  // 보드레이트 명시적 설정
+    
+    // 버퍼 플러시
+    while(pc.readable()) {
+        pc.getc();
+    }
+    
+    // 약간의 지연 추가
+    wait_ms(100);
+    
     pc.printf("\n\n------------------ Pop-in Protocol Stack starts! --------------------------\n");
+    
+    // 출력 버퍼 플러시
+    fflush(stdout);
     
     //source ID setting only (destination will be auto-detected)
     pc.printf(":: ID for this node : ");
+    fflush(stdout);  // 강제 플러시
+    
     pc.scanf("%d", &input_thisId);
     pc.getc();
     

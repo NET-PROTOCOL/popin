@@ -39,9 +39,9 @@ uint8_t L3_msg_encodeBoothInfo(uint8_t* msg, uint8_t currentCount, uint8_t capac
     return L3_MSG_OFFSET_DATA + 3 + descLen + 1; // Total message size
 }
 
-// Encode REGISTER_RESPONSE message
+// REGISTER_RESPONSE 메시지 인코딩 확인
 uint8_t L3_msg_encodeRegisterResponse(uint8_t* msg, uint8_t success, uint8_t reason) {
-    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_REGISTER_RESPONSE;
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_REGISTER_RESPONSE; // 0x07
     msg[L3_MSG_OFFSET_DATA] = success;
     msg[L3_MSG_OFFSET_DATA + 1] = reason;
     return 3; // Total message size

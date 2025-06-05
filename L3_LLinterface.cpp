@@ -1,4 +1,3 @@
-// L3_LLinterface.cpp - Add RSSI/SNR getters
 #include "mbed.h"
 #include "L3_FSMevent.h"
 #include "L3_msg.h"
