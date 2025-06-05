@@ -5,5 +5,5 @@
 
 
 #define L2_ARQ_MAXRETRANSMISSION        10
-#define L2_ARQ_MAXWAITTIME              5
-#define L2_ARQ_MINWAITTIME              2
+#define L2_ARQ_MAXWAITTIME              3   // 5 -> 3더 빠른 재전송
+#define L2_ARQ_MINWAITTIME              1  // 2->1 감소
