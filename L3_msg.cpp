@@ -18,6 +18,13 @@ uint8_t L3_msg_encodeUserInfoRequest(uint8_t* msg) {
     return 1; // Total message size
 }
 
+// Encode CONNECT_REQUEST message
+uint8_t L3_msg_encodeConnectRequest(uint8_t* msg, uint8_t userId) {
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_CONNECT_REQUEST;
+    msg[L3_MSG_OFFSET_DATA] = userId;
+    return 2; // Total message size
+}
+
 // Encode USER_RESPONSE message
 uint8_t L3_msg_encodeUserResponse(uint8_t* msg, uint8_t response) {
     msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_USER_RESPONSE;
@@ -39,9 +46,9 @@ uint8_t L3_msg_encodeBoothInfo(uint8_t* msg, uint8_t currentCount, uint8_t capac
     return L3_MSG_OFFSET_DATA + 3 + descLen + 1; // Total message size
 }
 
-// REGISTER_RESPONSE 메시지 인코딩 확인
+// Encode REGISTER_RESPONSE message
 uint8_t L3_msg_encodeRegisterResponse(uint8_t* msg, uint8_t success, uint8_t reason) {
-    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_REGISTER_RESPONSE; // 0x07
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_REGISTER_RESPONSE;
     msg[L3_MSG_OFFSET_DATA] = success;
     msg[L3_MSG_OFFSET_DATA + 1] = reason;
     return 3; // Total message size
@@ -73,4 +80,25 @@ uint8_t L3_msg_encodeAdminMessage(uint8_t* msg, const char* message) {
     if (msgLen > 100) msgLen = 100;  // Limit message length
     memcpy(&msg[L3_MSG_OFFSET_DATA], message, msgLen + 1); // Include null terminator
     return L3_MSG_OFFSET_DATA + msgLen + 1; // Total message size
+}
+
+// Encode CHAT_MESSAGE message (사용자가 Admin에게 보낼 때)
+uint8_t L3_msg_encodeChatMessage(uint8_t* msg, const char* message) {
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_CHAT_MESSAGE;
+    uint8_t msgLen = strlen(message);
+    if (msgLen > 100) msgLen = 100;  // Limit message length to 100 chars
+    memcpy(&msg[L3_MSG_OFFSET_DATA], message, msgLen + 1); // Include null terminator
+    return L3_MSG_OFFSET_DATA + msgLen + 1; // Total message size
+}
+
+// Encode CHAT_MESSAGE with sender ID (Admin이 중계할 때)
+uint8_t L3_msg_encodeChatMessageWithSender(uint8_t* msg, uint8_t senderId, const char* message) {
+    msg[L3_MSG_OFFSET_TYPE] = MSG_TYPE_CHAT_MESSAGE;
+    msg[L3_MSG_OFFSET_DATA] = senderId;  // First byte is sender ID
+    
+    uint8_t msgLen = strlen(message);
+    if (msgLen > 99) msgLen = 99;  // Limit message length to 99 chars (1 byte for sender ID)
+    memcpy(&msg[L3_MSG_OFFSET_DATA + 1], message, msgLen + 1); // Include null terminator
+    
+    return L3_MSG_OFFSET_DATA + 1 + msgLen + 1; // Total message size
 }
