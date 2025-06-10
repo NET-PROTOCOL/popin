@@ -14,7 +14,7 @@
 #define L3STATE_IN_USE 3
 
 // 세션 타이머 설정
-#define SESSION_DURATION_MS 40000    // 세션 당 40초 (변경 가능)
+#define SESSION_DURATION_MS 100000    // 세션 당 100초 (변경 가능)
 #define TIMER_CHECK_INTERVAL 1000000 // 1초마다 타이머 확인
 #define QUEUE_READY_TIMEOUT_MS 10000 // 큐 준비 응답 대기 10초
 
@@ -52,13 +52,25 @@ static uint8_t connectRetryCount = 0;    // 연결 재시도 카운터 (사용�
 static uint32_t connectRequestTime = 0;  // 연결 요청 시각 기록 (ms)
 static uint8_t isWaitingForBoothInfo = 0; // 부스 정보 응답 대기 중인지 플래그
 
+// 등록 요청 관련 변수 추가
+static uint8_t registerRetryCount = 0;    // 등록 재시도 카운터
+static uint32_t registerRequestTime = 0;  // 등록 요청 시각 기록 (ms)
+static uint8_t isWaitingForRegisterResponse = 0; // 등록 응답 대기 중인지 플래그
+
 #define CONNECT_RETRY_MAX 3               // 부스 연결 재시도 최대 횟수
 #define CONNECT_TIMEOUT_MS 3000           // 부스 연결 응답 타임아웃 (3초)
+#define REGISTER_RETRY_MAX 3              // 등록 재시도 최대 횟수
+#define REGISTER_TIMEOUT_MS 3000          // 등록 응답 타임아웃 (3초)
 
 // RSSI 기반 부스 스캔
 static BoothScanInfo_t scannedBooths[MAX_BOOTHS]; // 스캔된 부스 정보 리스트
 static uint8_t isScanning = 0;                    // 스캔 중 여부 플래그
 static uint8_t scanResponseCount = 0;              // 스캔 응답 받은 개수
+
+// 채팅 기능 관련 변수 추가
+static uint8_t isTypingChat = 0;          // 채팅 입력 중 여부
+static char chatBuffer[101];              // 채팅 메시지 버퍼 (최대 100자)
+static uint8_t chatIndex = 0;             // 채팅 버퍼 인덱스
 
 // 메시지 버퍼
 static uint8_t txBuffer[L3_MAXDATASIZE];
@@ -90,6 +102,8 @@ static void removeFromWaitingQueue(uint8_t userId);  // 대기 큐에서 사용�
 static void updateAllWaitingUsers(void);             // 모든 대기 사용자에게 순번 업데이트
 static void checkQueueReadyTimeout(void);            // 큐 준비 시간 초과 확인
 static void handleQueueReadyTimeout(uint8_t userId); // 큐 준비 시간 초과 처리
+static void handleChatMessage(uint8_t srcId, char* message);  // 채팅 메시지 처리
+static void broadcastChatToActiveUsers(uint8_t senderId, const char* message); // 채팅 브로드캐스트
 
 // RSSI 기반 선택 함수 프로토타입
 static void initializeBoothScanList(void);
@@ -155,6 +169,7 @@ void L3_initFSM(uint8_t id)
         pc.printf("\n=== USER MODE: ID %d ===\n", id);
         pc.printf("Starting RSSI-based booth scanning...\n");
         pc.printf("Press 'e' to exit booth when inside\n");
+        pc.printf("Press 'c' to chat when inside booth\n");  // 채팅 안내 추가
         pc.printf("Session limit: %d seconds per booth\n", SESSION_DURATION_MS / 1000);
         main_state = L3STATE_SCANNING; // 초기 상태: SCANNING
 
@@ -295,6 +310,67 @@ void L3_FSMrun(void)
 
         switch (msgType)
         {
+        case MSG_TYPE_CHAT_MESSAGE: // 채팅 메시지 처리
+            if (!isAdmin && main_state == L3STATE_IN_USE)
+            {
+                // 사용자가 부스 내에서 채팅 메시지 수신
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                uint8_t originalSenderId;
+                char *chatMsg;
+                
+                // 메시지 포맷 확인 (첫 바이트가 유효한 사용자 ID인지)
+                if (msgData[0] >= 4 && msgData[0] <= 254) {
+                    // Admin이 중계한 메시지 (발신자 ID 포함)
+                    originalSenderId = msgData[0];
+                    chatMsg = (char*)(msgData + 1);
+                } else {
+                    // 직접 수신한 메시지 (구 형식)
+                    originalSenderId = srcId;
+                    chatMsg = (char*)msgData;
+                }
+                
+                // 채팅 입력 중이면 줄바꿈 후 메시지 표시
+                if (isTypingChat)
+                {
+                    pc.printf("\n");
+                }
+                
+                // 자신이 보낸 메시지는 이미 표시했으므로 스킵
+                if (originalSenderId != myId)
+                {
+                    pc.printf("[CHAT] User %d: %s\n", originalSenderId, chatMsg);
+                }
+                
+                // 채팅 입력 중이었다면 프롬프트 다시 표시
+                if (isTypingChat)
+                {
+                    pc.printf("Continue typing: ");
+                    // 현재까지 입력한 내용 다시 표시
+                    for (uint8_t i = 0; i < chatIndex; i++)
+                    {
+                        pc.putc(chatBuffer[i]);
+                    }
+                }
+            }
+            else if (isAdmin)
+            {
+                // 관리자가 채팅 메시지 수신 및 브로드캐스트
+                char *chatMsg = (char *)L3_msg_getData(dataPtr);
+                pc.printf("\n[CHAT] User %d: %s\n", srcId, chatMsg);
+                
+                // 해당 사용자가 activeList에 있는지 확인
+                if (checkUserInList(myBooth.activeList, myBooth.currentCount, srcId))
+                {
+                    // 같은 부스의 다른 활성 사용자들에게 브로드캐스트
+                    broadcastChatToActiveUsers(srcId, chatMsg);
+                }
+                else
+                {
+                    pc.printf("[Admin] Warning: User %d not in active list, chat rejected\n", srcId);
+                }
+            }
+            break;
+
         case MSG_TYPE_TIMEOUT_ALERT: // 타이머 만료 알림 처리 (사용자 측)
             if (!isAdmin)
             {
@@ -337,9 +413,12 @@ void L3_FSMrun(void)
                 uint8_t *msgData = L3_msg_getData(dataPtr);
                 uint8_t response = msgData[0];
 
+                pc.printf("\n[Admin] Received USER_RESPONSE from User %d: %s\n", 
+                         srcId, response == USER_RESPONSE_YES ? "YES" : "NO");
+
                 if (response == USER_RESPONSE_YES)
                 {
-                    pc.printf("\n[Admin] User %d wants to experience the booth\n", srcId);
+                    pc.printf("[Admin] User %d wants to experience the booth\n", srcId);
                     // 이어서 REGISTER_REQUEST 메시지를 수신할 예정
                 }
                 else
@@ -599,6 +678,12 @@ void L3_FSMrun(void)
         case MSG_TYPE_REGISTER_RESPONSE: // 등록 응답 수신 (사용자 측)
             if (!isAdmin)
             {
+                pc.printf("\n[User] Received REGISTER_RESPONSE\n");
+                
+                // 등록 응답 대기 플래그 해제
+                isWaitingForRegisterResponse = 0;
+                registerRetryCount = 0;
+                
                 handleRegisterResponse(L3_msg_getData(dataPtr));
             }
             break;
@@ -640,6 +725,7 @@ void L3_FSMrun(void)
         static uint32_t userScanTimer = 0;
         static uint32_t sessionDisplayTimer = 0;
         static uint32_t connectTimeoutTimer = 0;
+        static uint32_t registerTimeoutTimer = 0;
 
         switch (main_state)
         {
@@ -700,6 +786,46 @@ void L3_FSMrun(void)
                     }
                 }
             }
+            
+            // REGISTER_RESPONSE 응답을 기다리는 중 타임아웃 처리
+            if (isWaitingForRegisterResponse)
+            {
+                registerTimeoutTimer++;
+                if (registerTimeoutTimer > 3000000)
+                { // 3초 타임아웃
+                    registerTimeoutTimer = 0;
+
+                    if (registerRetryCount < REGISTER_RETRY_MAX)
+                    {
+                        registerRetryCount++;
+                        pc.printf("\n[User] No registration response. Retrying... (%d/%d)\n",
+                                  registerRetryCount, REGISTER_RETRY_MAX);
+
+                        // USER_RESPONSE와 REGISTER_REQUEST 재전송
+                        uint8_t responseMsg[2];
+                        L3_msg_encodeUserResponse(responseMsg, USER_RESPONSE_YES);
+                        L3_LLI_dataReqFunc(responseMsg, 2, currentBoothId);
+                        
+                        wait_ms(100); // 짧은 대기
+                        
+                        sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
+                        registerRequestTime = us_ticker_read() / 1000;
+                    }
+                    else
+                    {
+                        pc.printf("\n[User] Failed to register after %d attempts.\n",
+                                  REGISTER_RETRY_MAX);
+                        pc.printf("Returning to scanning mode...\n");
+
+                        // 초기화 후 스캔 모드로 복귀
+                        main_state = L3STATE_SCANNING;
+                        currentBoothId = 0;
+                        registerRetryCount = 0;
+                        isWaitingForRegisterResponse = 0;
+                        initializeBoothScanList();
+                    }
+                }
+            }
             break;
 
         case L3STATE_WAITING:
@@ -731,6 +857,7 @@ void L3_FSMrun(void)
                 {
                     uint32_t remainingTime = (SESSION_DURATION_MS - elapsedTime) / 1000;
                     pc.printf("\n[Info] Time remaining: %d seconds\n", remainingTime);
+                    pc.printf("Press 'c' to chat, 'e' to exit\n");  // 채팅 안내 추가
                 }
                 else
                 {
@@ -965,6 +1092,30 @@ static void handleQueueReadyTimeout(uint8_t userId)
     admitNextWaitingUser();
 }
 
+// 채팅 메시지를 같은 부스의 활성 사용자들에게 브로드캐스트
+static void broadcastChatToActiveUsers(uint8_t senderId, const char* message)
+{
+    uint8_t chatMsg[110];
+    uint8_t msgSize = L3_msg_encodeChatMessageWithSender(chatMsg, senderId, message);
+    
+    // 같은 부스의 모든 활성 사용자에게 전송 (발신자 제외)
+    for (uint8_t i = 0; i < myBooth.currentCount; i++)
+    {
+        uint8_t targetUserId = myBooth.activeList[i].userId;
+        
+        // 발신자 제외하고 전송
+        if (targetUserId != senderId)
+        {
+            L3_LLI_dataReqFunc(chatMsg, msgSize, targetUserId);
+            pc.printf("[Admin] Forwarded chat to User %d\n", targetUserId);
+        }
+    }
+    
+    // 발신자에게도 에코백 (선택사항 - 자신의 메시지 확인용)
+    // 주석 처리: 사용자는 이미 자신의 메시지를 봤으므로 불필요
+    // L3_LLI_dataReqFunc(chatMsg, msgSize, senderId);
+}
+
 // Initialize booth scan list (RSSI 스캔 초기화)
 static void initializeBoothScanList(void)
 {
@@ -1133,6 +1284,7 @@ static void handleRegisterResponse(uint8_t *data)
         pc.printf("Your experience session has started.\n");
         pc.printf("Session duration: %d seconds\n", SESSION_DURATION_MS / 1000); // 신규: 세션 정보 안내
         pc.printf("Press 'e' to exit the booth early.\n");
+        pc.printf("Press 'c' to chat with other users in the booth.\n");  // 채팅 안내 추가
         main_state = L3STATE_IN_USE; // CONNECTED → IN_USE (!C1 & C2 조건 만족)
 
         // 사용자 측 세션 타이머 시작
@@ -1255,6 +1407,58 @@ static void L3service_processKeyboardInput(void)
 {
     char c = pc.getc();
 
+    // 채팅 입력 중인 경우 - 모든 키 입력을 채팅으로 처리
+    if (isTypingChat)
+    {
+        if (c == '\r' || c == '\n')
+        {
+            // 채팅 메시지 전송
+            chatBuffer[chatIndex] = '\0';
+            
+            if (chatIndex > 0)
+            {
+                pc.printf("\n");
+                
+                // 채팅 메시지 전송
+                uint8_t chatMsg[110];
+                uint8_t msgSize = L3_msg_encodeChatMessage(chatMsg, chatBuffer);
+                L3_LLI_dataReqFunc(chatMsg, msgSize, currentBoothId);
+                
+                pc.printf("[Chat] You: %s\n", chatBuffer);
+            }
+            else
+            {
+                pc.printf("\n");  // 빈 메시지인 경우 줄바꿈만
+            }
+            
+            // 채팅 입력 상태 초기화
+            isTypingChat = 0;
+            chatIndex = 0;
+        }
+        else if (c == '\b' || c == 127)
+        {
+            // 백스페이스 처리
+            if (chatIndex > 0)
+            {
+                chatIndex--;
+                pc.printf("\b \b");
+            }
+        }
+        else if (c == 27)  // ESC 키로 채팅 취소
+        {
+            pc.printf("\n[Chat cancelled]\n");
+            isTypingChat = 0;
+            chatIndex = 0;
+        }
+        else if (chatIndex < 100)
+        {
+            // 채팅 버퍼에 문자 추가 (e 포함 모든 문자)
+            chatBuffer[chatIndex++] = c;
+            pc.putc(c);
+        }
+        return;  // 채팅 모드에서는 다른 명령 처리 안함
+    }
+
     // 부스 선택 응답 처리 (CONNECTED 상태에서)
     if (L3_event_checkEventFlag(L3_event_keyboardInput) && main_state == L3STATE_CONNECTED)
     {
@@ -1270,6 +1474,12 @@ static void L3service_processKeyboardInput(void)
             // REGISTER_REQUEST 전송 (부스에 등록 요청)
             pc.printf("Sending registration request...\n");
             sendMessage(MSG_TYPE_REGISTER_REQUEST, NULL, 0, currentBoothId);
+            
+            // 등록 응답 대기 상태 설정
+            registerRetryCount = 0;
+            isWaitingForRegisterResponse = 1;
+            registerRequestTime = us_ticker_read() / 1000;
+            
             L3_event_clearEventFlag(L3_event_keyboardInput);
         }
         else if (c == 'n' || c == 'N')
@@ -1292,8 +1502,19 @@ static void L3service_processKeyboardInput(void)
         return;
     }
 
+    // 일반 명령 처리 (채팅 모드가 아닐 때만)
+    
+    // 채팅 시작 ('c' 키) - IN_USE 상태에서만 가능
+    if ((c == 'c' || c == 'C') && main_state == L3STATE_IN_USE && !isTypingChat)
+    {
+        pc.printf("\nEnter chat message (max 100 chars, ESC to cancel): ");
+        isTypingChat = 1;
+        chatIndex = 0;
+        return;
+    }
+
     // 종료 명령 처리 ('e' 키): 부스에서 나가기 또는 대기열 탈퇴
-    if (c == 'e' || c == 'E')
+    if ((c == 'e' || c == 'E') && !isTypingChat)  // 채팅 모드가 아닐 때만
     {
         if (!isAdmin && main_state == L3STATE_IN_USE)
         {
@@ -1460,7 +1681,7 @@ static void L3admin_processKeyboardInput(void)
                         pc.printf("%d seconds remaining", remainingTime);
                         if (remainingTime < 10)
                         {
-                            pc.printf("EXPIRING SOON!");
+                            pc.printf(" EXPIRING SOON!");
                         }
                     }
                     else
