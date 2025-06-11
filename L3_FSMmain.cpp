@@ -914,7 +914,7 @@ static void startSessionTimer(uint8_t userId)
     }
 }
 
-// Check session timers for all active users (관리자 측)
+// 모든 활성 사용자에 대한 세션 타이머 확인 (관리자 측)
 static void checkSessionTimer(void)
 {
     uint32_t currentTime = us_ticker_read() / 1000; // ms 단위
@@ -949,7 +949,7 @@ static void checkSessionTimer(void)
     }
 }
 
-// End user session (관리자 측, activeList에서만 제거)
+// 사용자 세션 종료 처리 (관리자 측, activeList에서만 제거)
 static void endUserSession(uint8_t userId)
 {
     // 활성 목록에서 사용자 찾아 세션 지속 시간 계산 (로그용)
@@ -971,7 +971,7 @@ static void endUserSession(uint8_t userId)
               userId, myBooth.currentCount, myBooth.capacity);
 }
 
-// Admit next waiting user (pull 기반 구현, 관리자 측)
+// 다음 대기 사용자 입장 처리 (풀 기반 구현, 관리자 측)
 static void admitNextWaitingUser(void)
 {
     if (myBooth.waitingCount > 0 && !isQueueReadyTimerActive)
@@ -1004,7 +1004,7 @@ static void admitNextWaitingUser(void)
     }
 }
 
-// NEW: Remove user from waiting queue (관리자 측)
+// 대기열에서 사용자 제거 (관리자 측)
 static void removeFromWaitingQueue(uint8_t userId)
 {
     uint8_t found = 0;
@@ -1031,7 +1031,7 @@ static void removeFromWaitingQueue(uint8_t userId)
     }
 }
 
-// Update all waiting users with new positions (관리자 측)
+// 모든 대기 사용자에게 새 순번 업데이트 (관리자 측)
 static void updateAllWaitingUsers(void)
 {
     for (uint8_t i = 0; i < myBooth.waitingCount; i++)
@@ -1110,13 +1110,10 @@ static void broadcastChatToActiveUsers(uint8_t senderId, const char* message)
             pc.printf("[Admin] Forwarded chat to User %d\n", targetUserId);
         }
     }
-    
-    // 발신자에게도 에코백 (선택사항 - 자신의 메시지 확인용)
-    // 주석 처리: 사용자는 이미 자신의 메시지를 봤으므로 불필요
-    // L3_LLI_dataReqFunc(chatMsg, msgSize, senderId);
+
 }
 
-// Initialize booth scan list (RSSI 스캔 초기화)
+// 부스 스캔 목록 초기화 (RSSI 스캔 초기화)
 static void initializeBoothScanList(void)
 {
     for (uint8_t i = 0; i < MAX_BOOTHS; i++)
@@ -1131,7 +1128,7 @@ static void initializeBoothScanList(void)
     }
 }
 
-// Update booth scan info with RSSI (RSSI 스캔 정보 갱신)
+// RSSI 기반으로 부스 스캔 정보 갱신 (RSSI 스캔 정보 갱신)
 static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCount,
                                 uint8_t capacity, uint8_t waitingCount)
 {
@@ -1151,7 +1148,7 @@ static void updateBoothScanInfo(uint8_t boothId, int16_t rssi, uint8_t currentCo
     }
 }
 
-// Select optimal booth based on RSSI and availability (부스 선택 로직)
+// RSSI 및 잔여 부스 정원 기반 최적 부스 선정 로직 (부스 선택 로직)
 static uint8_t selectOptimalBooth(void)
 {
     uint8_t bestBoothId = 0;
@@ -1165,12 +1162,12 @@ static uint8_t selectOptimalBooth(void)
         {
             // 점수 계산 로직:
             // 1. RSSI (신호 강도) - 주요 요인
-            // 2. 가용 공간 (capacity - currentCount) - 보너스 점수
+            // 2. 부스 빈 자리 수(잔여 정원) (capacity - currentCount) - 보너스 점수
             // 3. 대기열 크기 (waitingCount) - 페널티 점수
 
             int16_t score = scannedBooths[i].rssi; // 기본 점수 = RSSI
 
-            // 가용 공간 보너스 부여
+            // 잔여 정원 보너스 부여
             uint8_t availableSpace = scannedBooths[i].capacity - scannedBooths[i].currentCount;
             if (availableSpace > 0)
             {
@@ -1196,7 +1193,7 @@ static uint8_t selectOptimalBooth(void)
     return bestBoothId; // 최적 부스 ID 반환 (없으면 0)
 }
 
-// Display all scanned booths (디버그용 스캔 결과 출력)
+// 디버그용으로 스캔된 모든 부스 출력 (디버그용 스캔 결과 출력)
 static void displayScannedBooths(void)
 {
     pc.printf("\n=== SCANNED BOOTHS (RSSI-based) ===\n");
