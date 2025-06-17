@@ -49,7 +49,7 @@ uint8_t L3_timer_getTimerStatus()
 // 부스 선택 타이머 시작
 void L3_timer_boothSelectionStart()
 {
-    boothSelectionTimer.attach(L3_timer_boothSelectionHandler, 2.0);  // 2초 후 타임아웃
+    boothSelectionTimer.attach(L3_timer_boothSelectionHandler, 10.0);  // 10초 후 타임아웃
     boothSelectionTimerStatus = 1;
 }
 

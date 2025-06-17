@@ -14,9 +14,11 @@
 #define L3STATE_IN_USE 3
 
 // 세션 타이머 설정
-#define SESSION_DURATION_MS 100000    // 세션 당 100초 (변경 가능)
+#define SESSION_DURATION_MS 120000    // 세션 당 120초 (변경 가능)
 #define TIMER_CHECK_INTERVAL 1000000 // 1초마다 타이머 확인
 #define QUEUE_READY_TIMEOUT_MS 10000 // 큐 준비 응답 대기 10초
+
+#define EXIT_DELAY_MS 500
 
 // 상태 변수
 static uint8_t main_state = L3STATE_SCANNING;  // 현재 FSM 상태
@@ -85,6 +87,7 @@ static void handleConnectRequest(uint8_t srcId);
 static void handleBoothInfo(uint8_t *data, uint8_t size);
 static void handleRegisterResponse(uint8_t *data);
 static void handleQueueInfo(uint8_t *data);
+static void printWaitingStatus();
 static uint8_t checkUserInList(User_t *list, uint8_t listSize, uint8_t userId);
 static uint8_t checkUserInRegisteredList(uint8_t userId);
 static uint8_t addUserToList(User_t *list, uint8_t *listSize, uint8_t userId);
@@ -97,6 +100,7 @@ static void L3admin_processKeyboardInput(void);      // 관리자 키보드 입�
 static void startSessionTimer(uint8_t userId);       // 사용자 세션 타이머 시작
 static void checkSessionTimer(void);                 // 관리자 측 세션 타이머 확인
 static void endUserSession(uint8_t userId);          // 사용자 세션 종료 처리
+int getUserWaitingPosition(User_t *waitingQueue, int waitingCount, int srcId);
 static void admitNextWaitingUser(void);              // 다음 대기 사용자 입장 알림
 static void removeFromWaitingQueue(uint8_t userId);  // 대기 큐에서 사용자 제거
 static void updateAllWaitingUsers(void);             // 모든 대기 사용자에게 순번 업데이트
@@ -234,8 +238,8 @@ void L3_FSMrun(void)
                                                          myBooth.currentCount, myBooth.capacity,
                                                          myBooth.waitingCount);
 
-            pc.printf("\n[Admin] Broadcasting booth info (Users: %d/%d)...\n",
-                      myBooth.currentCount, myBooth.capacity);
+            //pc.printf("\n[Admin] Broadcasting booth info (Users: %d/%d)...\n",
+                      //myBooth.currentCount, myBooth.capacity);
             L3_LLI_dataReqFunc(announceData, msgSize, BROADCAST_ID);
         }
     }
@@ -287,11 +291,13 @@ void L3_FSMrun(void)
         uint8_t msgType = L3_msg_getType(dataPtr); // 메시지 타입
         int16_t rssi = L3_LLI_getRssi();   // RSSI 값 (dBm)
 
+        pc.printf("[DEBUG] Received msgType: %02X\n", msgType);
+
         // 모든 메시지 수신 로그 출력 (관리자 또는 일반 사용자)
         if (!isAdmin || msgType != MSG_TYPE_BOOTH_ANNOUNCE)
         {
-            pc.printf("\n[%s] RX: Type=0x%02X, Src=%d, Size=%d, RSSI=%d\n",
-                      isAdmin ? "Admin" : "User", msgType, srcId, size, rssi);
+            //pc.printf("\n[%s] RX: Type=0x%02X, Src=%d, Size=%d, RSSI=%d\n",
+                      //isAdmin ? "Admin" : "User", msgType, srcId, size, rssi);
         }
 
         // 스캔 중 아닌 상태에서 부스 방송 메시지 필터링 (일반 사용자)
@@ -304,14 +310,14 @@ void L3_FSMrun(void)
         // 주기적 메시지가 아닌 경우 디버그 출력
         if (msgType != MSG_TYPE_BOOTH_ANNOUNCE || !isAdmin)
         {
-            pc.printf("[DEBUG] Received message type 0x%02X from ID %d (RSSI: %d dBm, size: %d)\n",
-                      msgType, srcId, rssi, size);
+            //pc.printf("[DEBUG] Received message type 0x%02X from ID %d (RSSI: %d dBm, size: %d)\n",
+                      //msgType, srcId, rssi, size);
         }
 
         switch (msgType)
         {
         case MSG_TYPE_CHAT_MESSAGE: // 채팅 메시지 처리
-            if (!isAdmin && main_state == L3STATE_IN_USE)
+           if (!isAdmin && (main_state == L3STATE_IN_USE))
             {
                 // 사용자가 부스 내에서 채팅 메시지 수신
                 uint8_t *msgData = L3_msg_getData(dataPtr);
@@ -515,15 +521,19 @@ void L3_FSMrun(void)
                 {
                     // 사용자 세션 종료 처리
                     endUserSession(srcId);
-
+                    
                     // EXIT_RESPONSE 전송 (성공)
                     uint8_t exitResp[2];
                     exitResp[0] = MSG_TYPE_EXIT_RESPONSE;
                     exitResp[1] = 1; // 성공
                     L3_LLI_dataReqFunc(exitResp, 2, srcId);
 
+                    // 약간의 지연 후 다음 대기 사용자 입장 (메시지 전송 안정성)
+                    wait_ms(50); // 50ms 지연
+
                     // 다음 대기 사용자 입장 시도
                     admitNextWaitingUser();
+
                 }
                 else
                 {
@@ -533,9 +543,24 @@ void L3_FSMrun(void)
             break;
 
         case MSG_TYPE_EXIT_RESPONSE: // 부스 퇴장 확인 응답 (사용자 측)
-            if (!isAdmin)
+             if (!isAdmin)
             {
-                pc.printf("\n[User] Exit confirmed by booth.\n");
+                uint8_t *msgData = L3_msg_getData(dataPtr);
+                uint8_t success = msgData[0];
+
+                if (success)
+                {
+                    pc.printf("[User] EXIT_RESPONSE received - exiting complete.\n");
+
+                    // 부스 정보 초기화 및 상태 전이
+                    main_state = L3STATE_SCANNING;
+                    currentBoothId = 0;
+                    initializeBoothScanList();
+                }
+                else
+                {
+                    pc.printf("[User] EXIT_RESPONSE failed - cannot exit.\n");
+                }
             }
             break;
 
@@ -622,8 +647,9 @@ void L3_FSMrun(void)
                         
                         // QUEUE_INFO 메시지 전송 (대기 순번, 총 대기 인원)
                         uint8_t queueData[3];
+                        uint8_t userWaitingNumber = myBooth.waitingQueue[myBooth.waitingCount - 1].waitingNumber;
                         uint8_t queueMsgSize = L3_msg_encodeQueueInfo(queueData, 
-                                                                    myBooth.waitingCount,  
+                                                                    userWaitingNumber,
                                                                     myBooth.waitingCount);
                         L3_LLI_dataReqFunc(queueData, queueMsgSize, srcId);
                         
@@ -631,9 +657,31 @@ void L3_FSMrun(void)
                                 srcId, myBooth.waitingCount, myBooth.waitingCount); //position:대기 순번/총 대기 인원
                     }
                     else
-                    {   // 이미 대기열에 있는 사용자가 다시 등록 요청을 보내면 -> 재등록 요청 무시 (!C3)
-                        pc.printf("[Admin] User %d already in waiting queue, ignoring duplicate request\n", srcId);
-                        // ** 네트워크 재전송, 타이밍 문제로 인해 추가함 **
+                    {
+                        pc.printf("[Admin] User %d already in waiting queue, re-sending response\n", srcId);
+
+                        // 대기열에서 사용자 위치 찾아서 다시 전송
+                        int position = getUserWaitingPosition(myBooth.waitingQueue, myBooth.waitingCount, srcId);
+                        if (position > 0)
+                        {
+                            // REGISTER_RESPONSE (대기열 등록 알림)
+                            uint8_t response[10];
+                            int msgSize = L3_msg_encodeRegisterResponse(response, 0, REGISTER_REASON_FULL_WAITING);
+                            L3_LLI_dataReqFunc(response, msgSize, srcId);
+
+                            wait_ms(100); // 지연 후 QUEUE_INFO
+
+                            uint8_t queueData[3];
+                            uint8_t queueMsgSize = L3_msg_encodeQueueInfo(queueData, position, myBooth.waitingCount);
+                            L3_LLI_dataReqFunc(queueData, queueMsgSize, srcId);
+
+                            pc.printf("User %d re-sent waiting queue info (position: %d/%d)\n", 
+                                    srcId, position, myBooth.waitingCount);
+                        }
+                        else
+                        {
+                            pc.printf("[Admin] ERROR: User %d in waiting list but position not found\n", srcId);
+                        }
                     }
                 }
                 else
@@ -703,14 +751,13 @@ void L3_FSMrun(void)
                     
                     // handleQueueInfo가 myWaitingNumber와 totalWaitingUsers를 설정함
                     handleQueueInfo(msgData);
+                    printWaitingStatus();
                     
                     // ** QUEUE_INFO만 받고 REGISTER_RESPONSE를 못받은 경우 대비 **
                     // QUEUE_INFO를 받았다는 것은 대기열에 있다는 것을 의미함
                     // 어떤 상태에서든 WAITING으로 전환
-                    if (main_state == L3STATE_CONNECTED) {
-                        pc.printf("[DEBUG] Transitioning to WAITING state due to QUEUE_INFO\n");
-                        main_state = L3STATE_WAITING;
-                    }
+                    pc.printf("[DEBUG] Transitioning to WAITING state due to QUEUE_INFO\n");
+                    
                 }
             }
             break;
@@ -786,7 +833,7 @@ void L3_FSMrun(void)
                     }
                 }
             }
-            
+            registerRetryCount = 0;
             // REGISTER_RESPONSE 응답을 기다리는 중 타임아웃 처리
             if (isWaitingForRegisterResponse)
             {
@@ -835,7 +882,7 @@ void L3_FSMrun(void)
             static uint8_t animIndex = 0;
 
             waitingAnimTimer++;
-            if (waitingAnimTimer > 1000000)
+            if (waitingAnimTimer > 5000000)
             {
                 waitingAnimTimer = 0;
                 pc.printf("\r Waiting... Position: %d/%d   ",
@@ -846,8 +893,8 @@ void L3_FSMrun(void)
         case L3STATE_IN_USE:
             // 부스 사용 중 남은 시간 주기적 표시
             sessionDisplayTimer++;
-            if (sessionDisplayTimer > 5000000 && isSessionActive)
-            { // 5초마다 남은 시간 표시
+            if (sessionDisplayTimer > 60000000 && isSessionActive)
+            { // 60초마다 남은 시간 표시
                 sessionDisplayTimer = 0;
                 uint32_t currentTime = us_ticker_read() / 1000;
                 uint32_t elapsedTime = currentTime - sessionStartTime;
@@ -891,7 +938,7 @@ void L3_FSMrun(void)
                     initializeBoothScanList();
 
                     pc.printf("Returned to scanning mode due to session timeout.\n");
-                    pc.printf("[DEBUG] State transition: IN_USE -> SCANNING (client timeout)\n");
+                    //pc.printf("[DEBUG] State transition: IN_USE -> SCANNING (client timeout)\n");
                 }
             }
             break;
@@ -938,7 +985,7 @@ static void checkSessionTimer(void)
             endUserSession(userId);
 
             // 약간의 지연 후 다음 대기 사용자 입장 (메시지 전송 안정성)
-            wait_ms(500); // 500ms 지연
+            wait_ms(EXIT_DELAY_MS); // 500ms 지연
 
             // 다음 대기 사용자 입장 시도
             admitNextWaitingUser();
@@ -990,6 +1037,15 @@ static void admitNextWaitingUser(void)
         pc.printf("[Admin] Sending QUEUE_READY (0x%02X) to User %d\n", MSG_TYPE_QUEUE_READY, nextUserId);
         L3_LLI_dataReqFunc(readyMsg, 2, nextUserId);
 
+         // 대기열에서 첫 번째 사용자 제거 및 뒤 사용자 앞으로 당기기
+        for (int i = 1; i < myBooth.waitingCount; i++)
+        {
+            myBooth.waitingQueue[i - 1] = myBooth.waitingQueue[i];
+            // waitingNumber 재조정: 순번 1부터 시작
+            myBooth.waitingQueue[i - 1].waitingNumber = i;
+        }
+        myBooth.waitingCount--;
+
         // 큐 준비 타이머 시작: 일정 시간 안에 응답이 없으면 제거
         pendingUserId = nextUserId;
         queueReadyStartTime = us_ticker_read() / 1000; // ms 단위 저장
@@ -1007,27 +1063,35 @@ static void admitNextWaitingUser(void)
 // 대기열에서 사용자 제거 (관리자 측)
 static void removeFromWaitingQueue(uint8_t userId)
 {
-    uint8_t found = 0;
-
-    // 대기 큐에서 사용자 찾기 및 제거
-    for (uint8_t i = 0; i < myBooth.waitingCount; i++)
+    int found = -1;
+    for (int i = 0; i < myBooth.waitingCount; i++)
     {
         if (myBooth.waitingQueue[i].userId == userId)
         {
-            found = 1;
-            // 뒤쪽 사용자 앞으로 한 칸씩 이동
-            for (uint8_t j = i; j < myBooth.waitingCount - 1; j++)
-            {
-                myBooth.waitingQueue[j] = myBooth.waitingQueue[j + 1];
-            }
-            myBooth.waitingCount--;
+            found = i;
             break;
         }
     }
 
-    if (found)
+    if (found >= 0)
     {
-        pc.printf("[Admin] Removed User %d from waiting queue\n", userId);
+        for (int i = found; i < myBooth.waitingCount - 1; i++)
+        {
+            myBooth.waitingQueue[i] = myBooth.waitingQueue[i + 1];
+        }
+        myBooth.waitingCount--;
+
+        for (int i = 0; i < myBooth.waitingCount; i++)
+        {
+            myBooth.waitingQueue[i].waitingNumber = i + 1;
+        }
+
+        pc.printf("[Admin] User %d removed from waiting queue. New waiting count: %d\n", userId, myBooth.waitingCount);
+        pc.printf("[Admin] Waiting queue after removal (count=%d): ", myBooth.waitingCount);
+for (int i = 0; i < myBooth.waitingCount; i++) {
+    pc.printf("%d ", myBooth.waitingQueue[i].userId);
+}
+pc.printf("\n");
     }
 }
 
@@ -1232,7 +1296,7 @@ static void sendMessage(uint8_t msgType, uint8_t *data, uint8_t dataLen, uint8_t
     // 주기적 메시지가 아닌 경우 디버그 출력
     if (msgType != MSG_TYPE_BOOTH_ANNOUNCE)
     {
-        pc.printf("[DEBUG] Sending message type 0x%02X to ID %d (size: %d)\n", msgType, destId, dataLen + 1);
+        //pc.printf("[DEBUG] Sending message type 0x%02X to ID %d (size: %d)\n", msgType, destId, dataLen + 1);
     }
 
     L3_LLI_dataReqFunc(txBuffer, dataLen + 1, destId);
@@ -1312,17 +1376,34 @@ static void handleRegisterResponse(uint8_t *data)
         }
     }
 }
-
 static void handleQueueInfo(uint8_t *data)
 {
-    // 대기열 순번 및 총 대기 사용자 수 수신 (QUEUE_INFO 메시지)
     myWaitingNumber = data[0];
     totalWaitingUsers = data[1];
+    main_state = L3STATE_WAITING;
+}
 
+static void printWaitingStatus()
+{
     pc.printf("\nYou are in the waiting queue.\n");
     pc.printf("Your position: %d/%d\n", myWaitingNumber, totalWaitingUsers);
     pc.printf("Please stay near the booth to enter when your turn arrives.\n");
+    pc.printf("If you don't, you will be removed from the waiting queue.\n");
     pc.printf("Press 'e' to leave the queue.\n");
+}
+
+// waitingQueue 배열에서 srcId를 찾아 1-based 위치 반환
+// 없으면 0 반환
+int getUserWaitingPosition(User_t *waitingQueue, int waitingCount, int srcId)
+{
+    for (int i = 0; i < waitingCount; i++)
+    {
+        if (waitingQueue[i].userId == srcId)
+        {
+            return i + 1; // 1-based position
+        }
+    }
+    return 0;
 }
 
 static uint8_t checkUserInList(User_t *list, uint8_t listSize, uint8_t userId)
@@ -1340,6 +1421,12 @@ static uint8_t checkUserInList(User_t *list, uint8_t listSize, uint8_t userId)
 
 static uint8_t addUserToList(User_t *list, uint8_t *count, uint8_t userId)
 {
+    // Admin은 리스트에 추가하지 않음
+    if (userId <= 3)  // Admin ID가 3 이하
+    {
+        return 1; // Admin은 성공으로 처리하지만 리스트에 추가하지 않음
+    }
+    
     // 리스트에 이미 있는지 중복 확인
     for (uint8_t i = 0; i < *count; i++)
     {
@@ -1527,11 +1614,7 @@ static void L3service_processKeyboardInput(void)
             // EXIT_REQUEST 전송 (관리자에게 퇴장 요청)
             sendMessage(MSG_TYPE_EXIT_REQUEST, NULL, 0, currentBoothId);
 
-            // 즉시 SCANNING 상태로 복귀
-            pc.printf("Exited the booth.\n");
-            pc.printf("Returning to RSSI-based scanning mode...\n");
-            main_state = L3STATE_SCANNING; // IN_USE → SCANNING
-            currentBoothId = 0;
+            pc.printf("Exit request sent. Waiting for confirmation...\n");
 
             // 새로운 스캔 준비
             initializeBoothScanList();
@@ -1542,9 +1625,11 @@ static void L3service_processKeyboardInput(void)
             pc.printf("\nLeaving waiting queue...\n");
 
             sendMessage(MSG_TYPE_QUEUE_LEAVE, NULL, 0, currentBoothId);
+            wait_ms(100);
 
             pc.printf("Left the queue. Returning to scanning mode...\n");
             main_state = L3STATE_SCANNING; // WAITING → SCANNING
+            pc.printf("Sending QUEUE_LEAVE to booth %d\n", currentBoothId);
             currentBoothId = 0;
             myWaitingNumber = 0;
             totalWaitingUsers = 0;

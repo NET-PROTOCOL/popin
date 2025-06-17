@@ -24,6 +24,7 @@
 #define MSG_TYPE_QUEUE_READY_ACK        0x12  // 입장 준비 확인(예약)
 #define MSG_TYPE_QUEUE_UPDATE           0x13  // 대기 순번 업데이트
 #define MSG_TYPE_QUEUE_LEAVE            0x14  // 대기열 이탈 요청
+#define ALREADY_WAITING                 0x15  // 이미 대기열 있음
 
 // 사용자 응답 값
 #define USER_RESPONSE_YES               1     // y
@@ -40,7 +41,7 @@
 #define ADMIN_ID_END                    3     // 관리자 ID 끝
 
 // 용량 및 제한
-#define MAX_BOOTH_CAPACITY              2     // 부스 정원 (테스트용 2명)
+#define MAX_BOOTH_CAPACITY              1     // 부스 정원
 #define MAX_USERS                       20    // 최대 사용자 수
 #define MAX_BOOTHS                      3     // 최대 부스 수
 
