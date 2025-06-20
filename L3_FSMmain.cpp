@@ -50,6 +50,7 @@ static uint8_t isQueueReadyTimerActive = 0; // 큐 준비 타이머 활성화 �
 static uint8_t myWaitingNumber = 0;      // 사용자 대기열 순번 (사용자 측)
 static uint8_t totalWaitingUsers = 0;    // 대기 중인 총 사용자 수 (사용자 측)
 
+
 static uint8_t connectRetryCount = 0;    // 연결 재시도 카운터 (사용자 측)
 static uint32_t connectRequestTime = 0;  // 연결 요청 시각 기록 (ms)
 static uint8_t isWaitingForBoothInfo = 0; // 부스 정보 응답 대기 중인지 플래그
